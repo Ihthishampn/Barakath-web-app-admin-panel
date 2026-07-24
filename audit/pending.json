@@ -1,0 +1,102 @@
+[
+ {
+  "group": "web-a",
+  "title": "Removing an applied coupon is a no-op server-side \u2014 placeOrder auto-applies the best offer anyway and burns a one-time reward",
+  "reason": "needs-coordination \u2014 placeOrder treats any falsy couponCode (null or '') as 'auto-apply the best offer' (functions/src/orders/checkout.ts:373-375). There is no client-only way to express 'no coupon'; it needs a new `noCoupon` flag (or sentinel) in PlaceOrderSchema plus the matching wrapper change in web/src/components/checkout/checkout.ts \u2014 both outside my file list."
+ },
+ {
+  "group": "web-a",
+  "title": "products.soldCount is never incremented on order placement, so popularity sort and the dashboard category chart are permanently zero",
+  "reason": "needs-coordination \u2014 the defect is that nothing writes soldCount; the fix belongs in the placeOrder transaction (functions/src/orders/checkout.ts, alongside the stock decrement) and in performCancellation / approved returns. ListingView.tsx's `b.soldCount - a.soldCount` sort is correct as written and cannot fix it client-side."
+ },
+ {
+  "group": "fn-rest",
+  "title": "Return window is hardcoded to 3 days server-side but the storefront gates on settings/returns.windowDays (finding #1)",
+  "reason": "already-fixed \u2014 functions/src/returns/requests.ts:33-66 now reads settings/returns.windowDays (default 7), treats <=0 as returns-disabled, and measures from deliveredAt ?? placedAt ?? createdAt. The remaining half (app/lib/features/orders/data/order.dart returnWindowDays = 3) is a Dart file outside my assigned file list \u2014 needs-coordination."
+ },
+ {
+  "group": "fn-rest",
+  "title": "broadcasts.opened is written once as 0 and never updated, so the Opened column is always 0",
+  "reason": "needs-coordination \u2014 the only non-UI fix is a Firestore document trigger on customers/{uid}/notifications that increments broadcasts/{id}.opened; that requires a new export wired into functions/src/index.ts (outside my file list), and it also contradicts the codebase's stated \"no document triggers\" rule (functions/src/affiliate/commissions.ts:4-5). The alternative in the finding \u2014 removing the Opened column \u2014 is a forbidden UI change."
+ },
+ {
+  "group": "app-checkout",
+  "title": "CF idempotency replay returns totalPaise instead of payablePaise (functions/src/orders/checkout.ts)",
+  "reason": "needs-coordination \u2014 the second half of the findOrderByNonce finding. checkout.ts is outside my assigned file list (another agent may be editing functions/), so I did not touch it."
+ },
+ {
+  "group": "admin-analytics",
+  "title": "Reports: switch to getDocs + useMemo, and scope the queries to the selected range",
+  "reason": "needs-coordination \u2014 the range lives in ReportsPage.tsx state and the hooks are called with no arguments; scoping per range, memoising computeKpis/computeTrend/computeTopProducts, and swapping onSnapshot for getDocs all require editing ReportsPage.tsx (and, for customers/orderRequests, the shared cache keys owned by the customers and returns features). I bounded the orders listener to the widest usable window instead \u2014 see fixed."
+ },
+ {
+  "group": "admin-analytics",
+  "title": "Category performance: drive labels/tints from the live categories collection and aggregate order revenue over the selected range",
+  "reason": "needs-coordination \u2014 categoryPerformance(products) is called from DashboardPage.tsx with products only; joining the categories collection or per-range order revenue needs new arguments/hooks at that call site, which is outside my assigned files."
+ },
+ {
+  "group": "admin-catalog",
+  "title": "Coupon 'Category restriction' (applicableCategories) is written but never enforced",
+  "reason": "needs-coordination \u2014 admin/src/features/coupons/api/coupons.ts already persists applicableCategories correctly; the missing enforcement is in functions/src/orders/checkout.ts (computeCouponDiscount / autoBestOffer) and web/src/components/checkout/offers.ts, both outside my assigned file list. Note for whoever picks it up: admin stores category *slugs*, so the server check must compare against each line's categorySlug/categoryId."
+ },
+ {
+  "group": "admin-catalog",
+  "title": "Changing a category tint fans out writes to products (denied for a categories-only sub-admin; partial-failure risk)",
+  "reason": "needs-coordination \u2014 the correct fix is to move fanOutCategoryTint into a Cloud Function gated by requireModule(req,'categories','edit') (functions/), or to have web/app readers derive categoryTint from the category doc instead of the denormalised product field. Both live outside admin/. I deliberately did not add a client-side workaround, since any in-admin change would only mask the permission denial rather than fix it."
+ },
+ {
+  "group": "admin-rest",
+  "title": "`settings/returns.autoRefundToWallet` is a dead toggle \u2014 no code ever reads it (StorefrontTab.tsx:329)",
+  "reason": "needs-coordination \u2014 verified still true: grep for `autoRefund` across functions/src, web/src, app/lib returns only packages/shared/src/types/settings.ts:84, this component and the two seed scripts. The real fix is in functions/src/returns/decisions.ts (read settings/returns and branch the refund), which is outside my assigned files. The only in-file alternative is deleting the toggle, which is a forbidden UI change."
+ },
+ {
+  "group": "admin-rest",
+  "title": "'Auto-refund to wallet' toggle in Settings writes a field no code ever reads (StorefrontTab.tsx:296)",
+  "reason": "needs-coordination \u2014 duplicate of the finding above, same root cause, same blocker (server-side change in functions/src/returns/decisions.ts, or a UI removal)."
+ },
+ {
+  "group": "admin-rest",
+  "title": "The `payments` collection has no writer \u2014 admin Payments page and GST-invoice export are permanently empty (payments.ts:10)",
+  "reason": "needs-coordination \u2014 verified still true: the only writer in the repo is scripts/seed.ts:684; functions/src has no `payments/{id}` write at all. The fix must be made in functions/src/orders/checkout.ts (placeOrder / verifyRazorpayPayment) and functions/src/returns/decisions.ts. Nothing in admin/src/features/payments/api/payments.ts can create the documents it reads."
+ },
+ {
+  "group": "admin-rest",
+  "title": "The `payments` collection is never written by any Cloud Function \u2014 Payments module only shows seeded rows (payments.ts:9)",
+  "reason": "needs-coordination \u2014 duplicate of the finding above, same root cause, same blocker (functions/src/orders/checkout.ts)."
+ },
+ {
+  "group": "admin-rest",
+  "title": "Review moderation writes products/{id}, so a reviews-only sub-admin cannot approve anything (reviews.ts:64)",
+  "reason": "needs-coordination \u2014 verified still true: firebase/firestore.rules:51 still gates products writes on `canWrite('products')` while reviews moderation is its own module, and the transaction is all-or-nothing. Both viable fixes (a `moderateReview` callable guarded by `requireModule(req,'reviews','approve')`, or widening the products rule for a rating-only diff) live in functions/ or firebase/firestore.rules, outside my assigned files. Splitting the transaction inside reviews.ts was rejected: it would let the review flip to 'approved' while the aggregate write fails, and re-approving is a no-op, so the rating could never be repaired."
+ },
+ {
+  "group": "admin-rest",
+  "title": "Review moderation writes the products doc, so a sub-admin with only the reviews module gets permission-denied (reviews.ts:64, security)",
+  "reason": "needs-coordination \u2014 duplicate of the finding above, same root cause, same blocker (firestore.rules / a Cloud Function)."
+ },
+ {
+  "group": "admin-rest",
+  "title": "Campaigns past their end date stay status 'active', so every client spin fails (spinner.ts:75)",
+  "reason": "needs-coordination \u2014 partly already fixed: app/lib/features/spin/data/spin_repository.dart now filters the startsAt\u2026endsAt window client-side (_isLive). web/src/app/(shop)/account/rewards/page.tsx:53 still queries on `status == 'active'` only, and nothing flips status to 'ended'. Both remaining fixes (the web query, or a scheduled sweep / lazy flip in functions/src/spin/execute.ts) are outside my files. admin/src/features/spinner/api/spinner.ts already derives 'Ended' correctly from the window (deriveSpinStatus:72-76) \u2014 there is nothing left to change there."
+ },
+ {
+  "group": "admin-rest",
+  "title": "admins.lastActiveAt / lastLoginAt are rendered but nothing ever updates them (SubAdminListPage.tsx:144)",
+  "reason": "needs-coordination \u2014 verified still true: the only writers are functions/src/admin/subAdmins.ts:44 (at creation) and the seed scripts, and firestore.rules makes /admins/{uid} write:false so the client cannot stamp them. The fix needs a `touchAdminSession` callable in functions/ plus a call from admin/src/features/auth/api/auth.ts \u2014 both outside my assigned files. Blanking the column would be a UI change."
+ },
+ {
+  "group": "rules",
+  "title": "Add a module check to the admin route guard so /reviews cannot be reached by URL",
+  "reason": "needs-coordination \u2014 the real client-side hole is admin/src/app/router.tsx:79 registering /reviews under RequireAuth with no module check, and admin/src/components/Sidebar.tsx only hiding the link. Both files are outside my assigned file list (firebase/firestore.rules only). The server-side hole is now closed regardless: the write is denied by rules."
+ },
+ {
+  "group": "seed",
+  "title": "Optional part of finding 1: make SpinSlice.fromMap / UserCoupon.fromDoc round rather than truncate",
+  "reason": "needs-coordination - those are app/lib/features/spin/data/spin_campaign.dart and app/lib/features/coupons/data/user_coupon.dart, outside my assigned file list (scripts/seed.ts only)."
+ },
+ {
+  "group": "seed",
+  "title": "Optional part of finding 2: add a route-level permission guard so URL-reachable modules match the sidebar",
+  "reason": "needs-coordination - requires editing admin/src/app/router.tsx (or a new guard component), outside my assigned file list."
+ }
+]

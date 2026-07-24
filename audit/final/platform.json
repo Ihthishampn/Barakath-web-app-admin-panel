@@ -1,0 +1,101 @@
+[
+  {
+    "title": "customers self-create rule lets a new user mint unlimited Spin & Win spins (and fake order history)",
+    "file": "firebase/firestore.rules",
+    "line": "188-194",
+    "severity": "critical",
+    "detail": "The `allow create` on /customers/{userId} constrains only uid, role, isBlocked, profileComplete, affiliate and wallet.balancePaise. Every other field of the brand-new document is attacker-controlled — notably `spinsRemaining` and `stats.*`. functions/src/spin/execute.ts:134 and :147 read `spinsRemaining` straight off the customer doc and treat any positive value as a bonus spin balance that is spendable AFTER the daily cap is exhausted (`if (exhaustedDaily && remaining <= 0) throw`), decrementing it by 1 per spin. Nothing anywhere re-derives or audits how that balance came to be; adminGrantSpins (functions/src/spin/grant.ts) is only one of its writers, not its authority. The `update` allowlist (rules line 180-181) correctly excludes spinsRemaining, so the hole is exclusively the create path — which is exactly the write an attacker performs by hand instead of letting ensureCustomerDoc (web/src/lib/customerDoc.ts:97) / registerUser (app/lib/features/auth/data/auth_repository.dart:306) do it. `stats.ordersCount` is unconstrained the same way, and it is the field executeSpin:97 uses for campaign eligibility ('existing') and functions/src/orders/checkout.ts:251 uses for the `targetUsers: 'existing'` coupon audience.",
+    "failure_scenario": "Attacker completes OTP sign-in (obtaining a valid ID token) and, before the client creates the profile doc, POSTs the create itself to Firestore with `{uid, role:'customer', isBlocked:false, profileComplete:false, affiliate:null, wallet:{balancePaise:0}, spinsRemaining: 1000000, stats:{ordersCount: 5}}`. The rule accepts it. They then call executeSpin one million times: every spin past the daily cap is authorised by the forged balance. Each `cashback` slice credits real money via `wallet.balancePaise` FieldValue.increment (execute.ts:173) and each discount slice mints a live coupon in customers/{uid}/coupons — both spendable at checkout. The forged stats.ordersCount also unlocks 'existing'-only campaigns and coupons.",
+    "fix": "Add the missing invariants to the create rule: `request.resource.data.spinsRemaining == 0 && request.resource.data.stats.ordersCount == 0 && request.resource.data.stats.totalSpentPaise == 0 && request.resource.data.wallet.lifetimeCreditsPaise == 0 && request.resource.data.wallet.lifetimeDebitsPaise == 0 && request.resource.data.referredBy == null` (or, better, move creation into the completeProfile Cloud Function and set create back to `if false`, which the rule's own comment already prescribes for production)."
+  },
+  {
+    "title": "App auto-applies promotional coupons it never validates, hard-blocking checkout when the server rejects them",
+    "file": "app/lib/features/checkout/data/offers.dart",
+    "line": "99-125",
+    "severity": "high",
+    "detail": "app/lib/features/checkout/checkout_screen.dart:334-352 auto-applies the top result of `listAvailableOffers` onto the checkout draft, and that code is sent verbatim to placeOrder (checkout_screen.dart:219, payment_screen.dart:149). But the app's promo filter (offers.dart:99-125) only checks `status`, `targetUsers != 'all'`, `autoApply`, expiry and `minCartValuePaise`. It does NOT check `usesCount >= maxUsesTotal`, `maxUsesPerUser`, `firstOrderOnly`, `validFrom`, or `applicableCategories` — and `_discount` (offers.dart:53-69) ignores `applicableCategories` entirely. The server enforces every one of those and THROWS rather than degrading: functions/src/orders/checkout.ts:243-246 (usage limit), :247-250 (per-user limit), :252-260 (first orders only), :266-268 (\"does not apply to the items in your bag\"). The web does not have this bug — web/src/components/checkout/offers.ts has a separate strict `evalPromo`/`bestOfferForCart` (lines 99-140, 267-290) that rejects firstOrderOnly, maxUsesPerUser>0 and category-ineligible coupons before auto-applying, and page.tsx:216 uses it. The app has no equivalent. There is also no recovery path: payment_screen.dart:185-200 only toasts the server's message; the coupon is left on the draft.",
+    "failure_scenario": "Admin creates a normal promo (targetUsers 'all') restricted to `applicableCategories: ['clothing']`. An app customer with only perfumes in the bag opens checkout; the app auto-applies it and shows the discount. Tapping Pay calls placeOrder, which throws failed-precondition 'This coupon does not apply to the items in your bag.' The toast appears, the coupon stays applied, and every retry fails — the customer cannot place any order from the app. Identical hard block occurs once a coupon reaches maxUsesTotal, and with the seeded coupons (scripts/seed.ts:722 sets maxUsesPerUser: 1 on all three, and WELCOME30 is firstOrderOnly with targetUsers 'all') it fires on the customer's SECOND order.",
+    "fix": "Port web's `evalPromo` gate into offers.dart: skip promos where `usesCount >= maxUsesTotal`, `maxUsesPerUser > 0`, `firstOrderOnly == true`, `validFrom > now`, or `applicableCategories` is non-empty (the app cart line has no category, so an unverifiable restriction must mean 'do not offer'). Additionally, clear the applied coupon on a coupon-shaped placeOrder failure so the customer is never wedged."
+  },
+  {
+    "title": "Admin screens read collections gated on a module they are not gated on — sub-admins get permission-denied",
+    "file": "firebase/firestore.rules",
+    "line": "132",
+    "severity": "medium",
+    "detail": "The read gates are per-module, but two admin screens cross module boundaries. (1) The Customers profile page (admin/src/features/customers/routes/CustomerProfilePage.tsx) calls `useCommissions` (admin/src/features/customers/api/customers.ts:46 — `collection('commissions') where affiliateUid == uid orderBy accruedAt desc`), which rules line 132 gates on `canView('affiliateProgram')`; and `useCustomerOrders` (customers.ts:32 — `collection('orders') where customerId == uid`), which rules line 98-99 gates on orders/dashboard. (2) The Affiliate members list (admin/src/features/affiliate/api/affiliate.ts:17 — `collection('customers') where affiliate.enabled == true`) is gated on rules line 178 `canView('customers')`, but the Affiliate screen itself is gated on the `affiliateProgram` module. Because rules are not filters, the whole query fails, not just the rows.",
+    "failure_scenario": "A sub-admin created with only the `customers` module (a plausible support role) opens a customer profile: the Commissions panel throws permission-denied and renders empty/error. Reproducible with the seeded `ops@barkath.app` sub-admin (scripts/seed.ts perms = dashboard, orders, customers, payments, refunds — no affiliateProgram). Symmetrically, a sub-admin with only `affiliateProgram` opens the Affiliate members screen and sees 'Couldn't load'.",
+    "fix": "Widen the two rules to accept either module: `commissions` read → `canView('affiliateProgram') || canView('customers') || isOwner(resource.data.affiliateUid)`; `customers` read → `isOwner(userId) || canView('customers') || canView('affiliateProgram')`. Keep the admin operand first so aggregates still work. Alternatively require the paired permission when creating the sub-admin."
+  },
+  {
+    "title": "Approving one review destroys an admin-entered product rating aggregate",
+    "file": "functions/src/reviews/moderation.ts",
+    "line": "88-97",
+    "severity": "medium",
+    "detail": "adminModerateReview recomputes `products/{id}.rating` and `.ratingCount` from scratch out of the approved review docs (`const count = next.length; const sum = ...; tx.update(pref, { ratingCount: count, rating, ... })`). The function's own comment at lines 65-69 recognises that 'every product carries an admin-entered / seeded rating with no review docs behind it, and the recompute would silently zero it' — but the guard it added (`affectsAggregate`) only suppresses the recompute for pending→rejected. The approve path still overwrites. The admin product form does write these fields directly: admin/src/features/products/api/products.ts:176-185 and :240 persist `rating` / `ratingCount` from ProductFormValues, and rules line 76-78 permit it.",
+    "failure_scenario": "A product is launched with an admin-entered aggregate of 4.6 from 312 ratings (migrated from the old store). The first genuine customer review — a 2-star — is approved. The transaction recomputes from the single approved review doc and writes `rating: 2, ratingCount: 1`. The 312-rating social proof is gone permanently and cannot be recovered from Firestore; every storefront card and PDP now shows 2.0 (1).",
+    "fix": "Carry the pre-existing aggregate as a baseline: store `seedRating`/`seedRatingCount` on the product and compute `rating = (seedSum + reviewSum) / (seedCount + reviewCount)`, or only take over the aggregate once approved reviews outnumber the seeded count. At minimum, refuse to reduce `ratingCount` below the stored value."
+  },
+  {
+    "title": "No client ever registers an FCM token, so every broadcast's push fan-out reaches zero devices",
+    "file": "functions/src/notifications/broadcast.ts",
+    "line": "204-216",
+    "severity": "medium",
+    "detail": "adminSendBroadcastNotification queries `fcmTokens where customerId in [...]` and multicasts to the returned document ids. `fcmTokens` is referenced exactly once in the entire repository — that read. A repo-wide grep for `fcmTokens`, `firebase_messaging`, `FirebaseMessaging` and `getToken` across app/lib, web/src and admin/src returns nothing: neither client ever creates a token document, and app/pubspec.yaml has no firebase_messaging dependency. The rule at firebase/firestore.rules:265-270 that permits self-managed token writes therefore protects a collection nobody writes.",
+    "failure_scenario": "An admin composes a broadcast and sends it. `reach` reports the number of inbox rows written (honest), status flips to 'sent', and the customer sees it the next time they open the app's Notifications screen — but no device ever receives a push. The store believes push marketing is live when only an in-app inbox exists.",
+    "fix": "Either wire token registration (add firebase_messaging to the app, write `fcmTokens/{token}` with `{customerId: uid, platform, updatedAt}` on login and token refresh, delete on sign-out) or remove the FCM block and relabel the feature as an in-app inbox so the admin is not misled."
+  },
+  {
+    "title": "Wallet breakdown buckets are write-only and never reconcile with the balance",
+    "file": "functions/src/wallet/adjust.ts",
+    "line": "42-49",
+    "severity": "low",
+    "detail": "`wallet.breakdown.{refundsPaise,rewardsPaise,cashbackPaise,topupPaise}` is incremented by topup.ts:90, cancel.ts:145, returns/decisions.ts:133, spin/execute.ts:174 and checkout.ts:829, but is NEVER decremented when the balance is spent (checkout.ts:823-827 debits `wallet.balancePaise` and `wallet.lifetimeDebitsPaise` only) and is never touched at all by adminAdjustWallet (adjust.ts:42-49 updates balancePaise and lifetimeCredits/Debits but no bucket). Both clients render the four buckets next to the balance as if they decomposed it: web/src/app/(shop)/account/wallet/page.tsx:200-202 and app/lib/features/wallet/data/wallet.dart:34-44 ('a stored breakdown by source').",
+    "failure_scenario": "A customer tops up ₹2,000, spends it all on an order, then receives a ₹300 admin credit. Balance reads ₹300; the breakdown card reads Top-ups ₹2,000 / Refunds ₹0 / Rewards ₹0 / Cashback ₹0 — summing to ₹2,000 with the ₹300 admin credit invisible. Support cannot use the breakdown to explain a balance.",
+    "fix": "Either decrement buckets proportionally on debit and add an `adminPaise` bucket written by adjust.ts, or relabel the stored fields as lifetime-by-source totals and stop presenting them beside the current balance."
+  },
+  {
+    "title": "fcmTokens update rule does not check the existing owner — a known token can be reassigned",
+    "file": "firebase/firestore.rules",
+    "line": "267-268",
+    "severity": "low",
+    "detail": "`allow create, update: if hasAppCheck() && isSignedIn() && request.resource.data.customerId == uid()` validates only the INCOMING customerId. The delete rule immediately below correctly checks `resource.data.customerId == uid()`, but update does not, so any signed-in user may overwrite an existing fcmTokens document (doc id = the FCM registration token) and point it at themselves.",
+    "failure_scenario": "Attacker learns victim's FCM registration token (leaked log, shared device, a compromised analytics sink) and writes `fcmTokens/{victimToken} = {customerId: attackerUid}`. The victim's device stops being included in broadcasts targeted at the victim's segment and starts receiving pushes aimed at the attacker's segment. Currently unreachable in practice because nothing writes this collection at all (see the FCM finding), but it becomes live the moment token registration is implemented.",
+    "fix": "Split the rule: `allow create: if isSignedIn() && request.resource.data.customerId == uid(); allow update: if isSignedIn() && resource.data.customerId == uid() && request.resource.data.customerId == uid();`"
+  },
+  {
+    "title": "Any signed-in user can squat the users/{phoneKey} directory entry for a phone number they do not own",
+    "file": "firebase/firestore.rules",
+    "line": "230",
+    "severity": "low",
+    "detail": "`allow create: if isSignedIn() && request.resource.data.uid == uid()` places no constraint on `phoneKey`, which is the document id and the only thing that identifies whose number it is. The collection is the pre-auth registered/not-registered oracle (web/src/lib/userDirectory.ts:29-32, app/lib/features/auth/data/auth_repository.dart:181). Related: web/src/lib/userDirectory.ts:38-42 writes with `setDoc(..., {merge:true})`, which is an UPDATE against an existing doc and rules line 231 denies update outright; the app already worked around this (auth_repository.dart:327-331 reads first and swallows the error), the web did not — web/src/components/auth/authActions.ts:176 awaits it inside a try whose catch returns `signedIn: false, restart: true`.",
+    "failure_scenario": "Attacker signs in with their own number, then writes users/919876543210 (a stranger's number) with their own uid. The victim's Register screen now says 'already registered' and routes them to Sign in. Separately, if a signup ever races an existing directory entry, the web's merge write is denied and the user is told 'Signed you in, but we couldn't load your profile' and forced to restart despite holding a valid session.",
+    "fix": "Move the existence check server-side into sendOtp (as the rule's own comment plans) and set `users` to `allow read, write: if false`. In the interim, make web's registerUser read-then-create like the app's, so a denied merge cannot strand a signed-in user."
+  },
+  {
+    "title": "Unpublished content pages are world-readable",
+    "file": "firebase/firestore.rules",
+    "line": "74",
+    "severity": "low",
+    "detail": "`match /content/{docId} { allow read: if hasAppCheck(); ... }` and `hasAppCheck()` returns true (line 66), so the whole `content` collection is readable with no authentication at all. Both clients filter on `published == true` (web/src/lib/siteSettings.ts:75, app/lib/features/settings/data/content_repository.dart:15-23 and :30-35 — the app's comment even notes 'Rules let any signed-in client read every content doc'), but that is a client-side filter over a publicly listable collection.",
+    "failure_scenario": "An admin drafts a revised Refund Policy or Terms in the Settings > Content editor and leaves `published: false` pending legal sign-off. Anyone can list the `content` collection unauthenticated and read the unreleased draft.",
+    "fix": "Gate the read on the field: `allow read: if hasAppCheck() && (resource.data.published == true || canView('settings'));` — keeping the aggregation ordering rule in mind, put `canView('settings')` first if any aggregate is ever added over this collection."
+  },
+  {
+    "title": "App cart/address writes are documented as create-safe but the rules deny a merge-create of customers/{uid}",
+    "file": "app/lib/features/cart/data/cart_repository.dart",
+    "line": "33-41",
+    "severity": "low",
+    "detail": "cart_repository.dart:33-37 and address_repository.dart:45-48 both justify `set(..., SetOptions(merge: true))` on `customers/{uid}` with 'so the write is create-safe: if customers/{uid} doesn't exist yet ... update() would throw NOT_FOUND'. Under security rules a merge set against a non-existent document is a CREATE, and firebase/firestore.rules:188-194 requires uid, role, isBlocked, profileComplete, affiliate and wallet.balancePaise on any create. A cart-only or addresses-only payload satisfies none of them, so the write is rejected with permission-denied rather than succeeding.",
+    "failure_scenario": "In the race the comment describes — a cart edit landing before the profile doc is created — the write is denied instead of creating the doc, so the optimistic line is reverted anyway. The stated mitigation does not hold.",
+    "fix": "Either correct the comments (the doc is always created at sign-in, so the merge only ever behaves as an update) or have the repository ensure the profile doc exists before its first write."
+  },
+  {
+    "title": "Review submission has no rate limit, no purchase verification, and no bound on customerName or body",
+    "file": "firebase/firestore.rules",
+    "line": "148-156",
+    "severity": "low",
+    "detail": "The reviews create rule validates customerId, status, rating range, productId type, moderatedBy and helpfulCount, but nothing else. `customerName` is fully client-supplied (app/lib/features/catalog/data/reviews_repository.dart:60-76 and the web ReviewForm both read it from the customer's own profile, but that is a client convention, not a rule), `body`/`title` are unbounded, the productId is not required to exist, and one customer may create unlimited pending reviews for the same product.",
+    "failure_scenario": "A single account scripts thousands of pending reviews with `customerName: 'Barkath Official'`; the admin moderation queue (admin/src/features/reviews/api/reviews.ts:12, an unbounded `orderBy('createdAt','desc')` over the whole collection) becomes unusable, and any that slip through moderation display under an impersonated name.",
+    "fix": "Constrain the create: `request.resource.data.customerName == get(/databases/$(database)/documents/customers/$(uid())).data.name`, `request.resource.data.body.size() <= 2000`, `request.resource.data.title == null || request.resource.data.title.size() <= 120`, and use a deterministic doc id (`{productId}_{uid}`) so one customer holds at most one review per product."
+  }
+]

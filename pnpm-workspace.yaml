@@ -1,0 +1,8 @@
+packages:
+  - "admin"
+  - "web"
+  - "packages/*"
+  - "functions"
+  - "scripts"
+# "web" (user website, Next.js) and "app" (Flutter) join here once scaffolded.
+# app/ will be a Flutter project — not a pnpm workspace member.

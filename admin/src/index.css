@@ -1,0 +1,100 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * Barkath admin design tokens — reproduced from the prototype's semantic
+ * variables (designs/Barakath Admin Prototype.dc.html) using the README hex
+ * palette + observed inline hexes. The real _ds/tokens/colors.css was not
+ * shipped with the prototype; swap these values in when it is provided.
+ */
+:root {
+  /* Brand — evergreen primary + gold money (README) */
+  --brand-primary: #0f7a5a;
+  --brand-primary-dark: #0b5e46;
+  --brand-primary-subtle: #e6f0ec;
+  --brand-gold: #daa227;
+  --brand-gold-strong: #c8901f;
+  --brand-gold-subtle: #f7edd6;
+
+  /* Text (warm neutrals) */
+  --text-primary: #1a1a1a;
+  --text-secondary: #6b6357;
+  --text-tertiary: #9c9384;
+
+  /* Surfaces — README app bg is near-white #FCFCFB (the prototype's #efeeea is
+     just its mock canvas). Near-white keeps login + dashboard on one bg. */
+  --surface-app: #fcfcfb;
+  --surface-card: #ffffff;
+
+  /* Borders */
+  --border-subtle: #ece9e1;
+  --border-default: #ded9ce;
+
+  /* Status */
+  --success: #1f8a5b;
+  --success-subtle: #e4f2ea;
+  --error: #e5484d;
+  --error-subtle: #fbeaea;
+  --info: #2a6fdb;
+  --info-subtle: #e7eefb;
+
+  --neutral-200: #efeeea;
+  --neutral-300: #e2dfd7;
+
+  --scrim: rgba(30, 24, 16, 0.45);
+
+  /* Warm-tinted shadows (rgba(95,74,46,·)) */
+  --shadow-sm: 0 1px 2px rgba(95, 74, 46, 0.06);
+  --shadow-md: 0 4px 12px rgba(95, 74, 46, 0.08);
+  --shadow-lg: 0 12px 32px rgba(95, 74, 46, 0.12);
+
+  --font-display: 'Manrope', ui-sans-serif, system-ui, sans-serif;
+  --font-ui: 'Manrope', ui-sans-serif, system-ui, sans-serif;
+
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--surface-app);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+@layer components {
+  .menu-item {
+    @apply w-full px-4 py-2 text-left font-ui text-[13px] text-text-secondary hover:bg-surface-app;
+  }
+}
+
+/* Hide scrollbars to match prototype chrome, keep scrollability. */
+*::-webkit-scrollbar {
+  display: none;
+}
+* {
+  scrollbar-width: none;
+}
+
+/* ── Admin preferences (features/account/prefs.ts) ─────────────────── */
+/* Compact density: tighter table rows across every screen. */
+:root[data-density='compact'] table td,
+:root[data-density='compact'] table th {
+  padding-top: 6px !important;
+  padding-bottom: 6px !important;
+}
+/* Reduced motion: disable transitions/animations app-wide. */
+:root[data-motion='reduced'] *,
+:root[data-motion='reduced'] *::before,
+:root[data-motion='reduced'] *::after {
+  transition: none !important;
+  animation: none !important;
+}

@@ -1,0 +1,1071 @@
+{
+ "web-a": {
+  "count": 18,
+  "files": [
+   "web/src/app/(auth)/create-profile/page.tsx",
+   "web/src/app/(shop)/account/affiliate/withdraw/page.tsx",
+   "web/src/app/(shop)/account/orders/[id]/page.tsx",
+   "web/src/app/(shop)/account/orders/[id]/return/page.tsx",
+   "web/src/app/(shop)/account/rewards/page.tsx",
+   "web/src/app/(shop)/account/wallet/page.tsx",
+   "web/src/app/(shop)/checkout/page.tsx",
+   "web/src/app/(shop)/checkout/success/page.tsx",
+   "web/src/components/account/orders.ts",
+   "web/src/components/catalog/ListingView.tsx",
+   "web/src/components/checkout/offers.ts",
+   "web/src/lib/cart.ts"
+  ],
+  "findings": [
+   {
+    "title": "Rewards coupon \"Apply\" is a dead button \u2014 /bag never reads the ?coupon= param",
+    "file": "web/src/app/(shop)/account/rewards/page.tsx",
+    "line": 98,
+    "severity": "high",
+    "category": "dead-button",
+    "detail": "`applyCode()` navigates to `/bag?coupon=<CODE>`. It is wired to both the manual code input (Apply button + Enter key, lines 227/232) and to every `CouponCard`'s Apply button (line 266). But `web/src/app/(shop)/bag/page.tsx` never calls `useSearchParams()` \u2014 a repo-wide grep for `useSearchParams`/`searchParams.get` returns only spin/result, addresses/new and orders/[id]/return. The bag page's only coupon path is its own local `code` state + `applyCoupon()` (bag/page.tsx:47-63), which is seeded from an empty `useState('')`. The query string is therefore parsed by nothing and silently discarded.",
+    "failure_scenario": "Customer wins SPIN-7Q2KX on the wheel, opens Account \u25b8 Rewards, taps Apply on the coupon card. The browser navigates to /bag?coupon=SPIN-7Q2KX, the bag renders with an empty \"Enter coupon code\" field, no coupon banner, and the order summary shows no discount. The coupon appears to have been applied (the click did something) but no `applyCoupon` callable ever ran.",
+    "fix": "In bag/page.tsx read the param (`const preset = useSearchParams().get('coupon')`) inside a `<Suspense>` boundary and, on mount, run the existing `callApplyCoupon(preset, lines)` path (or at minimum `setCode(preset)`), then strip the param via `router.replace('/bag')`."
+   },
+   {
+    "title": "Wallet history rows render a blank title for top-ups, cancellation refunds and spin cashback",
+    "file": "web/src/app/(shop)/account/wallet/page.tsx",
+    "line": 188,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "The row is rendered with `title={tx.title}` and `TxRow` prints it raw (components/wallet/TxRow.tsx:44). `WalletTransaction.title` is declared non-optional (packages/shared/src/types/customers.ts:162), but three of the six writers never set it: functions/src/wallet/topup.ts:97-101 (source 'topup') writes only `description: 'Wallet top-up'`; functions/src/orders/cancel.ts:116-126 (source 'refund') writes only `description: 'Refund for cancelled order \u2026'`; functions/src/spin/execute.ts:143-147 (source 'spin_reward' cashback) writes only `description: 'Spin & Win cashback'`. Only checkout.ts, adjust.ts and returns/decisions.ts set `title`. The Flutter app handles this explicitly \u2014 app/lib/features/wallet/data/wallet.dart:71-86 has `displayTitle` with a per-source fallback ('Added to wallet', 'Refund \u00b7 #ORD-\u2026', etc.) \u2014 so the two surfaces disagree on the same collection.",
+    "failure_scenario": "Customer tops up \u20b9500 (verifyTopUp writes the ledger row) and opens Account \u25b8 Wallet. The row shows the icon and \"+\u20b9500.00\" with an empty bold title line and only the date underneath; the same transaction reads \"Added to wallet\" in the app. Identical blank rows appear for every wallet refund from a cancelled order and every spin cashback credit.",
+    "fix": "Mirror the app's fallback in the web reader \u2014 add a `txTitle(tx)` helper in components/wallet/actions.ts switching on `tx.source` (topup/refund/spin_reward/cashback/order_payment/withdrawal/admin_adjust) with `tx.title || tx.description || <source label>` \u2014 and/or add the missing `title` field to the three Cloud Function writers."
+   },
+   {
+    "title": "Web withdrawal always pays the first bank account; no way to pick, default or delete one",
+    "file": "web/src/app/(shop)/account/affiliate/withdraw/page.tsx",
+    "line": 29,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "The payout bank is fixed: `bankAccounts.find(b => b.isDefault) ?? bankAccounts[0]`, and `bank.id` is what gets sent to `requestWithdrawal` (line 66). The only bank write in the whole web app is banks/new/page.tsx:61, which hardcodes `isDefault: banks.length === 0` and appends. A repo-wide grep for `bankAccounts` in web/src returns only these three read sites plus affiliate/page.tsx:103 \u2014 there is no set-default, no delete, and no selector. Yet the UI offers \"Change\" (withdraw/page.tsx:156) and \"Add new bank account\" (affiliate/referral/page.tsx:111), both of which link to /account/banks/new. The Flutter app does have a picker: app/lib/features/affiliate/affiliate_withdraw_screen.dart:266 opens `_pickBank` whenever `banks.length > 1`.",
+    "failure_scenario": "Affiliate saves HDFC \u2022\u20224821 (becomes isDefault), later closes that account and taps \"Change\" \u2192 adds ICICI \u2022\u20229930. The new record is written with isDefault:false, so `find(isDefault)` still resolves to HDFC. The withdraw screen keeps showing HDFC, and Confirm withdrawal files a payout to the closed account. The customer can never route money to the new bank from the web.",
+    "fix": "Add a bank list/selector on the withdraw screen (local `selectedBankId` state seeded from the default, like the app), plus set-default and delete actions that rewrite the `bankAccounts` array \u2014 the customers update rule already whitelists `bankAccounts` (firebase/firestore.rules:135)."
+   },
+   {
+    "title": "Removing an applied coupon is a no-op server-side \u2014 placeOrder auto-applies the best offer anyway and burns a one-time reward",
+    "file": "web/src/app/(shop)/checkout/page.tsx",
+    "line": 176,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "placeOrder sends `couponCode: draft.coupon?.code ?? null` (line 176). On the server, a null couponCode does not mean \"no discount\" \u2014 it triggers autoBestOffer() (functions/src/orders/checkout.ts:349), which scans promo + personal coupons and applies the largest one, marks a personal coupon `status: 'used'` (line 567) and writes the spin-reward ledger row. The web \"Remove\" button (line 337) just clears the local draft, and the auto-apply effect is one-shot (`autoTried`, line 89), so the UI then shows and charges no discount while the server does.",
+    "failure_scenario": "Customer has a spin coupon SPIN100 (\u20b9100 off, single use). Checkout auto-applies it, user presses Remove because they want to save it for a bigger order. Summary shows To pay \u20b91000. placeOrder sends couponCode null \u2192 autoBestOffer picks SPIN100 \u2192 order total \u20b9900 and the coupon is flipped to 'used'. For Razorpay the modal then asks for \u20b9900, not the \u20b91000 shown; the reward the customer explicitly declined is consumed permanently.",
+    "fix": "Send an explicit \"no coupon\" signal (e.g. a `noCoupon: true` flag or an empty-string sentinel the server treats as 'skip autoBestOffer'), so an intentional removal suppresses the server-side auto-apply."
+   },
+   {
+    "title": "Web never checks firstOrderOnly / maxUsesPerUser / maxUsesTotal / active, so it auto-applies coupons that placeOrder hard-rejects",
+    "file": "web/src/components/checkout/offers.ts",
+    "line": 36,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "promoDiscount() (lines 36-51) and listAvailableOffers() (lines 110-126) filter only on status/targetUsers/autoApply/expiry/min. The server's authoritative computeCouponDiscount() additionally rejects on `active === false` (functions/src/orders/checkout.ts:135), `usesCount >= maxUsesTotal` (line 149), per-user redemptions via customers/{uid}/couponUsage (lines 152-155) and `firstOrderOnly` against stats.totalOrders (lines 156-161) \u2014 each as a thrown HttpsError, not a silent skip. Because the checkout page auto-applies the best offer into draft.coupon (line 92) and then passes that code explicitly, the strict path always runs.",
+    "failure_scenario": "Seeded WELCOME30 has firstOrderOnly: true and maxUsesPerUser: 1. A returning customer with 3 past orders opens /checkout: WELCOME30 is auto-applied and shown as \"Best offer applied\". Every \"Place order\" click fails with 'This coupon is for first orders only.' \u2014 the customer cannot check out at all until they discover the Remove link, and the toast never says which coupon is at fault.",
+    "fix": "Mirror the server's eligibility rules client-side (skip coupons with active===false, usesCount>=maxUsesTotal, firstOrderOnly when the customer has prior orders), and on a placeOrder coupon error clear draft.coupon automatically so the retry can succeed."
+   },
+   {
+    "title": "Return item picker silently submits the first eligible item when the customer never selects a radio",
+    "file": "web/src/app/(shop)/account/orders/[id]/return/page.tsx",
+    "line": 93,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "`itemId` initialises to `preItemId ?? ''` (line 84). When the customer arrives via the OrderCard \"Return\" link there is no `?itemId=` param, so `preItemId` is null and `itemId` is `''`. With more than one eligible item `showPicker` is true (line 125) and every radio renders unchecked. `submit()` then does `const targetItemId = itemId || selectedItem?.id;` (line 93), and `selectedItem` falls through to `eligible[0]` (line 90). Nothing forces a selection and no validation error is raised for an unpicked item \u2014 only the reason is validated (line 98).",
+    "failure_scenario": "Delivered order with 3 items. Customer clicks \"Return\" on the order card, the picker lists all 3 with none selected, they scroll past it, choose reason \"Item damaged\", and hit Submit. A return request is created against item #1 (the first in the array) instead of the item they meant. The toast says \"Return request submitted.\" and the wrong item is stamped `returnStatus: 'requested'`, blocking a fresh request for it while the actually-damaged item is still marked returnable.",
+    "fix": "When `showPicker` is true, require an explicit selection: default `itemId` to `eligible[0].id` (and render that radio checked) or add `if (!itemId) { toast.error('Select an item to return.'); return; }` before the reason check."
+   },
+   {
+    "title": "Return page treats items with a missing returnStatus as already-returned, dead-ending legacy orders",
+    "file": "web/src/app/(shop)/account/orders/[id]/return/page.tsx",
+    "line": 80,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "`eligible` is `items.filter((it) => it.returnStatus === 'none' || it.returnStatus === 'rejected')` \u2014 an item whose `returnStatus` field is absent is excluded. Every other surface treats absent as eligible: `hasReturnableItem` in web/src/components/account/orders.ts:242 is `!x.returnStatus || x.returnStatus === 'none' || x.returnStatus === 'rejected'`, and the server (functions/src/returns/requests.ts:64) gates on `if (it.returnStatus && it.returnStatus !== 'none' && it.returnStatus !== 'rejected')`. The legacy `orders/{id}/items` subcollection path in `useOrderItems` exists precisely for pre-migration orders, which are the ones most likely to lack the field.",
+    "failure_scenario": "A pre-migration delivered order whose subcollection items have no `returnStatus` key. `useOrderItems` loads 2 items from the subcollection; `eligible` is empty while `items.length > 0`, so the page renders the terminal message \"Every item in this order already has a return in progress. Check the order for its status.\" (line 117-123). No form, no way forward \u2014 even though the server would happily accept the request and the order detail badge shows no active return.",
+    "fix": "Change the filter to `!it.returnStatus || it.returnStatus === 'none' || it.returnStatus === 'rejected'`, reusing the existing `hasReturnableItem` predicate so all three surfaces agree."
+   },
+   {
+    "title": "Web checkout offer list uses the same wrong promo-coupon field names, so applying an offer makes placeOrder fail",
+    "file": "web/src/components/checkout/offers.ts",
+    "line": 42,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "`promoDiscount()` (line 42) and `listAvailableOffers()` (line 115) gate on `c.minOrderPaise`, `c.expiresAt`, `c.maxDiscountPaise` \u2014 none of which the admin writes (see `saveCoupon`, which writes `minCartValuePaise`, `validUntil`, `discountMaxCapPaise`). So every promo coupon is displayed as `qualifies: true` with `sub: 'On any order'` regardless of its real minimum, and expired ones are still listed. `web/src/app/(shop)/checkout/page.tsx:103` (`applyOffer`) then stuffs that offer straight into the local draft with no server round-trip, and `placeOrder` re-validates through `computeCouponDiscount`, which DOES read `minCartValuePaise` (checkout.ts:143) and throws. The Flutter app's equivalent (app/lib/features/checkout/data/offers.dart:53) reads both name variants, so app and web disagree about the same coupon doc.",
+    "failure_scenario": "Coupon FEST20 has minCartValuePaise = \u20b92,000. Customer with a \u20b9600 cart opens web checkout: FEST20 is listed as qualifying with the full discount and is even auto-applied by `bestOfferForCart`. Tapping 'Place order' calls placeOrder, which throws failed-precondition 'Your cart does not meet this coupon's minimum.' The order can never be placed until the customer manually removes the auto-applied coupon.",
+    "fix": "Change `PromoCoupon` and both readers to `minCartValuePaise`, `validUntil`, `discountMaxCapPaise` (keeping the legacy names only as fallbacks, as offers.dart does), and validate a tapped offer through `callApplyCoupon` before storing it in the draft."
+   },
+   {
+    "title": "\"Skip for now\" on Create profile persists nothing \u2014 the user is forced back to it on every sign-in",
+    "file": "web/src/app/(auth)/create-profile/page.tsx",
+    "line": 123,
+    "severity": "medium",
+    "category": "dead-button",
+    "detail": "The Skip button's only action is `router.replace('/')`. It writes nothing, so `customers/{uid}.profileComplete` stays false. Sign-in routing is driven purely by that flag: authActions.ts:88-90 returns `needsProfile: !profileComplete`, and signin/page.tsx:72 does `router.replace(needsProfile ? '/create-profile' : '/')`. The `profileSkipped` field exists in the seeded doc (lib/customerDoc.ts:38), in the shared type (packages/shared/src/types/customers.ts:116) and in the rules' allowed-update list (firestore.rules:134) \u2014 but a grep across web/, app/lib, functions/src and admin/src shows nothing ever writes it to Firestore. The app solves the same problem locally (app/lib/core/services/app_prefs.dart:25, honoured at splash_screen.dart:54); the web has no equivalent.",
+    "failure_scenario": "New customer verifies their OTP, taps \"Skip for now\", shops as a guest-named account. They sign out and back in the next day: verifyOtp returns needsProfile=true and they land on /create-profile again. Every subsequent sign-in repeats this, forever, with no way to dismiss it permanently.",
+    "fix": "Have Skip write `{ profileSkipped: true, updatedAt: serverTimestamp() }` to customers/{uid} (already permitted by the rules) and change the signin route condition to `needsProfile && !customer.profileSkipped`."
+   },
+   {
+    "title": "Wallet top-up accepts any amount above \u20b90 while the server rejects anything under \u20b9100",
+    "file": "web/src/app/(shop)/account/wallet/page.tsx",
+    "line": 59,
+    "severity": "medium",
+    "category": "incomplete",
+    "detail": "`submitTopUp` validates only `Number.isFinite(rupees) && rupees > 0`; the numeric input is free-form (line 136 strips non-digits but imposes no bounds). The callable enforces `MIN_TOPUP = 100_00` and `MAX_TOPUP = 100_000_00` (functions/src/wallet/topup.ts:20-31) and throws `failed-precondition` with the real message before Razorpay is ever opened. The client's `catch` (line 79-81) discards `e` entirely and toasts the fixed `WALLET_CF_MSG` = \"This goes live once the rewards/wallet service is deployed.\"",
+    "failure_scenario": "Customer types 50 in the Add money field and presses Add money. topUpWallet throws \"Minimum top-up is \u20b9100.\" The UI instead tells them the wallet service is not deployed \u2014 so they stop trying rather than entering a valid amount. Same for any value over \u20b91,00,000.",
+    "fix": "Mirror the server bounds client-side (reject <\u20b9100 / >\u20b91,00,000 with the specific message, as the withdraw screen already does for its minimum) and surface the callable's own message in the catch: `const m = (e as {message?:string})?.message; toast.error(m && !m.startsWith('INTERNAL') ? m : WALLET_CF_MSG)`."
+   },
+   {
+    "title": "Withdrawal errors are swallowed into a misleading \"service not deployed\" toast",
+    "file": "web/src/app/(shop)/account/affiliate/withdraw/page.tsx",
+    "line": 70,
+    "severity": "medium",
+    "category": "incomplete",
+    "detail": "`confirm()`'s catch is `catch { toast.error(WALLET_CF_MSG) }` \u2014 the HttpsError is not inspected. `requestWithdrawal` throws four distinct user-facing `failed-precondition` messages (functions/src/affiliate/requests.ts:36-47): affiliate not active, \"You already have a withdrawal in progress.\", amount exceeds balance, and below minimum, plus \"Choose a valid bank account.\" The client pre-validates only balance (line 55) and minimum (line 60); `affiliate.hasPendingWithdrawal` is never checked anywhere in web/src, so that branch is unreachable client-side and always surfaces the wrong text.",
+    "failure_scenario": "Affiliate requests \u20b92,000, admin has not yet processed it, so `affiliate.hasPendingWithdrawal` is true. They come back and request \u20b91,000. The server correctly refuses with \"You already have a withdrawal in progress.\" but the screen says \"This goes live once the rewards/wallet service is deployed.\" \u2014 the customer believes the feature is broken and files a support ticket.",
+    "fix": "Extract the existing `errMessage(e, fallback)` helper from components/auth/authActions.ts:109 and use it here; additionally disable the Confirm button with an inline note when `affiliate.hasPendingWithdrawal` is true."
+   },
+   {
+    "title": "Applied discount is frozen at apply-time, so changing cart quantities makes the displayed total diverge from what is charged",
+    "file": "web/src/app/(shop)/checkout/page.tsx",
+    "line": 130,
+    "severity": "medium",
+    "category": "cross-surface-mismatch",
+    "detail": "draft.coupon.discountPaise is captured once \u2014 from callApplyCoupon (page.tsx:152, bag/page.tsx:53) or from bestOfferForCart (page.tsx:92) \u2014 and computeSummary is then fed that fixed number (page.tsx:130-137) no matter how the subtotal changes. Nothing re-runs it: the bag page lets the user change quantities with the coupon banner still shown (bag/page.tsx:90-91), and the checkout auto-apply is guarded by the one-shot `autoTried` ref. The server always recomputes the percentage against the live subtotal (functions/src/orders/checkout.ts:171, 191).",
+    "failure_scenario": "Customer applies EID15 (15%, no cap) on a \u20b91000 cart \u2192 discountPaise \u20b9150 stored. They go back to the bag and raise quantities to \u20b94000, then check out: summary still shows \u2212\u20b9150 and To pay \u20b93850, while placeOrder computes \u2212\u20b9600 and charges \u20b93400. The reverse (shrinking the cart below minCartValuePaise) makes placeOrder throw and blocks checkout entirely.",
+    "fix": "Recompute the coupon whenever subtotalPaise changes \u2014 re-run bestOfferForCart/callApplyCoupon for the applied code on subtotal change, or store the coupon rule (type/percent/cap/min) instead of a precomputed paise amount and derive the discount inside computeSummary."
+   },
+   {
+    "title": "Cart lines cache the price from the moment of \"Add to bag\" and are never revalidated against the product doc",
+    "file": "web/src/lib/cart.ts",
+    "line": 134,
+    "severity": "medium",
+    "category": "cross-surface-mismatch",
+    "detail": "CartLine stores pricePaise/mrpPaise snapshotted in ProductDetail.handleAdd (web/src/components/catalog/ProductDetail.tsx:131) and subtotalPaise() (cart.ts:134) sums those cached values; the line is persisted verbatim into customers/{uid}.cart (cart.ts:97) and survives indefinitely across devices and sessions. Neither the bag page nor the checkout page ever re-reads products/{id}. The server prices every line from the live product/variant doc (functions/src/orders/checkout.ts:61-72, 89), so the subtotal the customer sees is only correct until the admin edits the price or the variant's offer.",
+    "failure_scenario": "Customer adds a perfume at \u20b9899 and leaves it in the bag. Admin raises offerPricePaise to \u20b91199. Next visit the bag and checkout still show \u20b9899 and \"Place order \u00b7 \u20b9899\", but placeOrder prices the line at \u20b91199 and the order/Razorpay charge is \u20b9300 higher than the figure on the button, with no warning or confirmation step.",
+    "fix": "Refresh cart line prices from products/{id} when the bag/checkout mounts (one getDoc per distinct productId, or a small batched read), show a \"price updated\" notice when a line changes, and block placement until the user acknowledges."
+   },
+   {
+    "title": "Order detail hides the Return CTA for the whole order as soon as any single item has an active return",
+    "file": "web/src/app/(shop)/account/orders/[id]/page.tsx",
+    "line": 233,
+    "severity": "medium",
+    "category": "missing-state",
+    "detail": "`const rb = returnBadge(items)` (line 68) uses `items.find(...)` over ALL items (web/src/components/account/orders.ts:232), returning the first item with an active return status. The render then does `order.status === 'delivered' && (rb ? <status badge> : rw?.open ? <Return item link> : ...)` \u2014 the per-order badge unconditionally replaces the per-item Return action. The return page itself is per-item and would still accept the remaining items.",
+    "failure_scenario": "Delivered order with 2 items. Customer returns item A; the CF stamps only item A with `returnStatus: 'requested'`. Reopening the order detail, `returnBadge` finds item A and renders \"Return request in progress\", and the \"Return item\" link disappears. Item B \u2014 still `returnStatus: 'none'` and inside the window \u2014 has no entry point from the order detail page, even though it is fully returnable.",
+    "fix": "Render the badge and the Return CTA independently: show the badge when `returnBadge(items)` is non-null AND still show the \"Return item\" link when `hasReturnableItem(items) && rw?.open` (that helper is already exported and currently unused)."
+   },
+   {
+    "title": "Return submission discards the Cloud Function's error message, so every failure reads as a transient glitch",
+    "file": "web/src/components/account/orders.ts",
+    "line": 313,
+    "severity": "medium",
+    "category": "missing-state",
+    "detail": "`requestReturn` is `try { await httpsCallable(...)(payload); return true } catch { return false }` \u2014 the HttpsError code and message are dropped on the floor. The caller (web/src/app/(shop)/account/orders/[id]/return/page.tsx:109) maps `false` to \"We couldn't submit your return just now. Please try again.\" The CF raises four distinct, permanent, non-retryable conditions: `permission-denied: Not your order`, `failed-precondition: Only delivered orders can be returned`, `failed-precondition: The 3-day return window ... has closed`, and `failed-precondition: A return is already in progress for this item`. Note `cancelOrder` in the same file (line 219-226) does propagate `e.message`, so the pattern already exists.",
+    "failure_scenario": "Customer submits a return for an item that already has a pending request (reachable via the OrderCard \"Return\" link plus a stale `?itemId=` deep link). The server returns `failed-precondition: A return is already in progress for this item.`; the UI says \"Please try again\", so the customer taps Submit repeatedly and each attempt fails identically with no explanation.",
+    "fix": "Return `{ ok: boolean; message?: string }` from `requestReturn` (mirroring `cancelOrder`) and surface `message` in the toast, falling back to the generic copy only when no message is present."
+   },
+   {
+    "title": "Three of five walletTransactions writers omit `title`, which the web wallet history renders directly",
+    "file": "web/src/app/(shop)/account/wallet/page.tsx",
+    "line": 188,
+    "severity": "medium",
+    "category": "cross-surface-mismatch",
+    "detail": "The web wallet history passes `title={tx.title}` with no fallback. `title` is required by the shared `WalletTransaction` type and is written by functions/src/wallet/adjust.ts:66 and by the order-payment/spin-reward rows in checkout.ts:582,596 \u2014 but NOT by functions/src/wallet/topup.ts:98 (top-up), functions/src/orders/cancel.ts:116 (cancellation refund) or functions/src/spin/execute.ts:143 (spin cashback), all of which write only `description`. The Flutter app tolerates this via `WalletTransaction.displayTitle`'s source-derived fallback (app/lib/features/wallet/data/wallet.dart:71) and admin does `t.title || cap(t.source)` (CustomerProfilePage.tsx:370); only the web renders the raw empty string. The spin cashback row additionally stores `balanceAfterPaise: 0` regardless of the real balance.",
+    "failure_scenario": "Customer tops up \u20b9500 on web, then cancels an order and gets a wallet refund. Their web Transaction history shows two rows with a blank bold title line and only a date subtitle, while the same two rows read 'Added to wallet' and 'Refund \u00b7 #BRK-48231' in the Flutter app.",
+    "fix": "Add a `title` to the topup, cancellation-refund and spin-cashback writes (mirroring adjust.ts), and compute `balanceAfterPaise` in execute.ts from the read balance plus the cashback; optionally add the app's source-derived fallback on the web too."
+   },
+   {
+    "title": "products.soldCount is never incremented on order placement, so popularity sort and the dashboard category chart are permanently zero",
+    "file": "web/src/components/catalog/ListingView.tsx",
+    "line": 100,
+    "severity": "medium",
+    "category": "missing-state",
+    "detail": "The storefront's popularity sort ranks by `b.soldCount - a.soldCount`, the admin dashboard's category-share chart sums `p.soldCount` (admin/src/features/dashboard/api/dashboard.ts:173), and firestore.indexes.json declares two composite indexes ordered by `soldCount DESC`. The field is initialised to 0 by admin/src/features/products/api/products.ts:156,201,287 and set to non-zero only by scripts/seed.ts:380. `placeOrder` decrements `stock` (functions/src/orders/checkout.ts:437,440) but never touches `soldCount`, and no other function or trigger writes it.",
+    "failure_scenario": "An admin adds 30 products through the panel and the store sells hundreds of units. On the storefront, 'Sort: Popularity' returns products in arbitrary (all-zero, stable-sort) order forever, and the admin dashboard's 'top categories' bars all render at 0% \u2014 while seeded demo products still show plausible values, hiding the bug.",
+    "fix": "Increment `soldCount` by the line quantity for each product inside the placeOrder transaction (and decrement it in performCancellation / on an approved return), alongside the existing stock decrement."
+   },
+   {
+    "title": "\"Download invoice\" on the order-success screen is a dead button claiming the order service is not live",
+    "file": "web/src/app/(shop)/checkout/success/page.tsx",
+    "line": 71,
+    "severity": "low",
+    "category": "dead-button",
+    "detail": "The button's only handler is `toast.message('Your invoice will be emailed once the order service is live.')` \u2014 no navigation, no callable, no download. The order service is deployed (functions/src/orders/invoice.ts exists, and the site already ships an invoice screen at web/src/app/(shop)/account/orders/[id]/invoice/page.tsx), so the message is a stale placeholder from the pre-deploy era \u2014 the same era as the CF_UNAVAILABLE_MSG constant in checkout.ts:24, which is now unused.",
+    "failure_scenario": "Customer places a COD order, lands on /checkout/success, clicks \"Download invoice\" \u2192 a toast says invoicing is not live yet. No invoice is fetched or downloaded, even though /account/orders/{id}/invoice would render it.",
+    "fix": "Link the button to /account/orders/{orderId}/invoice (the placed draft would need to carry orderId alongside shortId, which placeOrder already returns), or remove the button."
+   }
+  ]
+ },
+ "fn-orders": {
+  "count": 10,
+  "files": [
+   "functions/src/orders/cancel.ts",
+   "functions/src/orders/checkout.ts",
+   "functions/src/orders/invoice.ts",
+   "functions/src/orders/status.ts"
+  ],
+  "findings": [
+   {
+    "title": "Commission confirmation on 'delivered' runs outside the status transaction and can never be retried",
+    "file": "functions/src/orders/status.ts",
+    "line": 98,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "The status transition commits in db.runTransaction (lines 63-95). Only afterwards, on a separate round trip, does line 99 call confirmCommissionsForOrder(orderId) and line 100 stamp affiliateCommissionStatus. confirmCommissionsForOrder itself opens a second transaction (commissions.ts:112) that can fail with ABORTED/DEADLINE_EXCEEDED. If it throws, the callable rejects \u2014 but the order is already status 'delivered' and TRANSITIONS.delivered === [] (line 20), so a retry of adminChangeOrderStatus throws 'Cannot move delivered -> delivered'. There is no scheduled reconciliation either: functions/src/index.ts exports only couponExpirySweep, and sweeps.ts has no commission logic. The audit log at line 103 is also skipped on that path, so the transition leaves no trace. Secondary issue on line 100: the affiliateCommissionStatus write is fired for every delivered order, including ones with no referrer (checkout.ts:518 initialises it to null), and its error is swallowed by .catch(() => undefined).",
+    "failure_scenario": "Admin marks order #BRK-48219 delivered. The status transaction commits; the follow-up commission transaction hits contention on customers/{affiliateUid} (that doc is also written by every other order of that affiliate) and fails after retries. The admin sees \"Couldn't update the status\" and clicks Delivered again -> failed-precondition. The commission row stays 'pending' forever, the affiliate's pendingBalancePaise is permanently inflated and the money is never withdrawable, with no admin UI or job able to fix it.",
+    "fix": "Move the commission clearance into the same transaction as the status write (read the commission rows and affiliate docs before any write), or make the transition idempotent \u2014 allow 'delivered' -> 'delivered' as a no-op re-entry that re-runs confirmCommissionsForOrder \u2014 and only stamp affiliateCommissionStatus when the order actually carries a commission."
+   },
+   {
+    "title": "Invoice button is permanently dead for an orders-only sub-admin: adminGenerateInvoice is gated on payments.view, not orders",
+    "file": "functions/src/orders/invoice.ts",
+    "line": 19,
+    "severity": "high",
+    "category": "dead-button",
+    "detail": "Every other action on the Order detail screen requires the orders module: adminChangeOrderStatus (status.ts:31) and adminAssignRider (shipment.ts:22) both call requireModule(req, 'orders', 'edit'). adminGenerateInvoice instead calls requireModule(req, 'payments', 'view'). 'orders' and 'payments' are separate keys in MODULE_KEYS (packages/shared/src/enums.ts:258-259), and the admin UI gates the Orders screen on the orders module only (Sidebar.tsx:12 checks modulePermissions[item.module].view). The mismatch cuts both ways: it is also a 'view' permission authorising two writes \u2014 ref.update on the CF-only-write orders collection (invoice.ts:62) and a publicly tokened Storage object (line 57).",
+    "failure_scenario": "A sub-admin is created with orders {view,edit} and no payments permission \u2014 the normal fulfilment operator. They open /orders/{id}, click Invoice, and get 'Missing payments.view permission.' every time, with no other way to produce an invoice for the customer. Conversely a read-only analyst with payments.view (and nothing else) can call adminGenerateInvoice directly and mutate invoiceUrl/invoiceGeneratedAt on any order plus publish its customer name, phone and address to a public Storage URL.",
+    "fix": "Change line 19 to requireModule(req, 'orders', 'edit') (or accept either orders.edit or payments.edit), matching the module the screen is gated on and the write the function performs."
+   },
+   {
+    "title": "placeOrder writes the `variants` array twice from the same pre-write snapshot when a cart holds two variants of one product, dropping the first variant's stock decrement",
+    "file": "functions/src/orders/checkout.ts",
+    "line": 437,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "`priced` maps 1:1 to the client's `lines`, and the cart keys lines by (productId, variantId) \u2014 see `web/src/lib/cart.ts:42-43` (`sameLine = a.productId === productId && a.variantId === variantId`) \u2014 so two variants of the same product are two separate lines with the same `productId`. Line 403 then does `Promise.all(priced.map(l => tx.get(db.doc('products/'+l.productId))))`, producing two independent snapshots of the *same* document, both holding the pre-transaction `variants` array. The forEach at 428-442 rebuilds `variants` from its own snapshot each iteration (line 433 `((p.variants) ?? []).map(v => ({...v}))`) and issues a second full-array `tx.update` at line 437. The two writes target one document in one transaction: the later whole-array write overwrites the earlier one, so only the last variant's decrement survives (and if the backend instead rejects two writes to one doc per transaction, checkout fails outright for such carts). Meanwhile `stock: FieldValue.increment(-qty)` is a transform and accumulates for both lines, so the top-level aggregate and the variants array also diverge. `orders/cancel.ts:88-96` restocks with the identical pattern and has the same defect in reverse.",
+    "failure_scenario": "Product P has variants S (stock 1) and M (stock 1). Customer adds 1\u00d7 S and 1\u00d7 M to the bag (two cart lines, same productId) and checks out. Both stock checks pass (each reads the original snapshot). The write for line S sets variants=[S:0, M:1]; the write for line M then sets variants=[S:1, M:0] and wins. Variant S is still shown as in stock and can be sold again \u2014 oversell of a physically shipped unit. Top-level `stock` drops by 2 while the variants array only reflects 1.",
+    "fix": "Deduplicate by productId before the transaction: group all lines of a product, read the doc once, apply every line's decrement to a single `variants` copy, and issue exactly one `tx.update` per product document (the same grouping `catalog/inventory.ts:35-41` already does). Apply the identical fix to the restock loop in `orders/cancel.ts:82-103`."
+   },
+   {
+    "title": "placeOrder validates and consumes coupons outside the transaction, so a single-use spin coupon can be spent on two concurrent orders",
+    "file": "functions/src/orders/checkout.ts",
+    "line": 347,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "`computeCouponDiscount` / `autoBestOffer` run at lines 347-349, before `db.runTransaction` opens at line 372. They read `customers/{uid}/coupons/{id}` (line 180-186: `status !== 'active'` check) and the promotional coupon's `usesCount` / per-user counter (lines 149-155) with plain non-transactional gets. Inside the transaction the coupon documents are never re-read: line 568 does a blind `tx.update(...{status:'used'...})` on the personal coupon, and lines 605-613 blindly increment `coupons/{id}.usesCount` and `customers/{uid}/couponUsage/{id}.count`. Because neither coupon doc is part of the transaction's read set, two overlapping placeOrder invocations do not contend on it and both commit. The idempotency key at line 370 does not help \u2014 it is derived from the cart/addressId or a client nonce, and two different carts (or two different client nonces) produce different keys.",
+    "failure_scenario": "Customer wins SPIN-ABCDE (flat \u20b9500 off, `maxUsesPerCoupon: 1`, status 'active') from the wheel. They open the web checkout in two tabs with different carts, enter SPIN-ABCDE in both, and press Place order within the same second. Both calls read status 'active' at line 184 and both pass; both transactions commit; both orders receive the \u20b9500 discount and both write `status:'used'` on the same coupon doc. \u20b9500 is given away twice. The same window lets a promotional coupon with `maxUsesTotal: 100` be redeemed past 100, since `usesCount` is read at line 149 outside the transaction.",
+    "fix": "Move the coupon document read inside the transaction: after resolving the coupon id outside (a query cannot run in a transaction), `tx.get` the coupon doc (`customers/{uid}/coupons/{id}` or `coupons/{id}` plus `customers/{uid}/couponUsage/{id}`) as part of the read phase, re-assert `status === 'active'` / `usesCount < maxUsesTotal` / per-user count against those fresh values, and recompute the discount from them before any write."
+   },
+   {
+    "title": "createRazorpayOrder and verifyPayment never check the order's status, so a gateway payment can be captured against an already-cancelled order",
+    "file": "functions/src/orders/checkout.ts",
+    "line": 713,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "`createRazorpayOrder` (lines 654-682) validates only `snap.exists`, `o.customerId === uid` and `amount > 0`; it never inspects `o.status` or `o.paymentStatus`. `verifyPayment` (lines 692-734) validates ownership, that `razorpayOrderId` matches, and short-circuits only when `paymentStatus === 'captured'` (line 713) \u2014 a cancelled order carries `status: 'cancelled'` and `paymentStatus: 'refunded'` or `'pending'` (set by `orders/cancel.ts:151`), neither of which is caught. verifyPayment then unconditionally stamps `paymentStatus: 'captured'` and `amountPaidPaise: totalPaise` (lines 725-731) on the cancelled order. Nothing anywhere reverses that: `performCancellation` refuses to run again (`cancel.ts:56-58` throws 'already cancelled'), so the gateway money has no path back to the customer.",
+    "failure_scenario": "Customer places a \u20b94,000 razorpay order; `placeOrder` returns with paymentStatus 'pending' and the Razorpay sheet opens. The customer leaves the sheet open. An admin, seeing an unpaid order, cancels it from the Orders screen \u2014 `adminChangeOrderStatus` \u2192 `performCancellation` restores stock, refunds only the wallet portion, sets status 'cancelled'. The customer then completes payment in the still-open sheet; the client calls `verifyPayment`, the signature is valid, and the function writes paymentStatus 'captured' / amountPaidPaise 400000 onto the cancelled order. The customer is charged \u20b94,000, receives nothing, and no refund is ever triggered. The same gap lets `createRazorpayOrder` be called again on an already-captured order and charge the customer a second time.",
+    "fix": "In `createRazorpayOrder`, reject when `o.status === 'cancelled'` or `o.paymentStatus === 'captured'/'refunded'`, and reuse an existing `o.razorpayOrderId` instead of overwriting it. In `verifyPayment`, reject (or auto-refund via the Razorpay refunds API) when `o.status === 'cancelled'` or `o.paymentStatus === 'refunded'` before writing the capture."
+   },
+   {
+    "title": "adminChangeOrderStatus confirms affiliate commissions after the transaction commits, and the delivered\u2192delivered transition is illegal, so a failure strands the commission as 'pending' forever",
+    "file": "functions/src/orders/status.ts",
+    "line": 99,
+    "severity": "high",
+    "category": "incomplete",
+    "detail": "The status transition commits in the transaction at lines 63-95. Only afterwards, at line 99, does the handler call `await confirmCommissionsForOrder(orderId)` \u2014 outside that transaction and with no try/catch. `confirmCommissionsForOrder` (affiliate/commissions.ts:107-136) performs its own query plus a second transaction that touches the affiliate's customer doc, so it can fail on contention, a Firestore deadline, or a missing index. When it throws, the error propagates out of the callable, `ref.update({affiliateCommissionStatus:'confirmed'})` at line 100 never runs, and `writeAudit` at line 103 never runs either. The admin sees the call fail and retries \u2014 but the order is already 'delivered' and `TRANSITIONS.delivered = []` (line 20), so the retry throws 'Cannot move delivered \u2192 cancelled/delivered'. There is no other caller of `confirmCommissionsForOrder` anywhere in the codebase and no scheduled reconciliation (scheduled/sweeps.ts only sweeps coupons), so the commission has no second chance.",
+    "failure_scenario": "Admin marks order #BRK-48123 (\u20b910,000, referred by affiliate A, \u20b9500 pending commission) delivered. The status transaction commits; `confirmCommissionsForOrder` then contends with a concurrent `placeOrder` accruing on the same affiliate doc and aborts. The admin sees 'internal error', clicks Delivered again and gets 'Cannot move delivered \u2192 delivered'. Affiliate A's \u20b9500 stays in `affiliate.pendingBalancePaise` and never reaches `confirmedBalancePaise` \u2014 the withdrawable balance \u2014 so it can never be withdrawn, and no audit log records the delivery.",
+    "fix": "Either fold the commission clearance into the same transaction as the status flip (read the pending commission docs before opening it, as `performCancellation` already does at cancel.ts:37-40), or wrap line 99 in a try/catch that logs and still writes the audit entry, and add a self-transition or a reconciliation sweep so 'delivered' orders with `affiliateCommissionStatus === 'pending'` can be re-confirmed."
+   },
+   {
+    "title": "firstOrderOnly coupon check reads customers.stats.totalOrders, a field no surface writes",
+    "file": "functions/src/orders/checkout.ts",
+    "line": 158,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "`computeCouponDiscount` gates first-order-only coupons on `Number((cust.get('stats'))?.totalOrders ?? 0) > 0`. The shared `CustomerStats` type (packages/shared/src/types/customers.ts:93) and every writer \u2014 web/src/lib/customerDoc.ts:62, app/lib/features/auth/data/auth_repository.dart:244, scripts/seed.ts:465 \u2014 use `ordersCount`. `totalOrders` only exists as a locally-computed dashboard field (admin/src/features/dashboard/api/dashboard.ts:23), never on a customer doc, so the expression is always 0 and the guard never trips. Compounding it, nothing ever increments `stats.*` after signup either (no `stats.` write exists anywhere in functions/src), so even the correctly-named `ordersCount` stays 0 \u2014 which is why admin/src/features/customers/routes/CustomersListPage.tsx:125 shows 'Orders: 0' for every real customer.",
+    "failure_scenario": "Admin creates WELCOME15 with targetUsers = 'new' (saveCoupon sets firstOrderOnly: true, maxUsesPerUser: 1). A customer with 40 previous orders enters WELCOME15 at checkout: the firstOrderOnly guard reads undefined \u2192 0 \u2192 passes, and the discount is granted. Separately, that customer's row in the admin Customers list and its CSV export both report 0 orders.",
+    "fix": "Read `stats.ordersCount` in the guard, and increment `stats.ordersCount`/`ordersDelivered`/`totalSpentPaise`/`lastOrderAt` on the customer doc inside the placeOrder and adminChangeOrderStatus transactions."
+   },
+   {
+    "title": "GST invoice omits the COD surcharge line, so the printed line items do not sum to the printed Total",
+    "file": "functions/src/orders/invoice.ts",
+    "line": 46,
+    "severity": "medium",
+    "category": "incomplete",
+    "detail": "The totals table emits only Subtotal, Discount, Delivery, GST and Total (invoice.ts:46-50). The order total is computed as `totalPaise = net + deliveryPaise + codSurchargePaise + taxPaise` (functions/src/orders/checkout.ts:291) and `codSurchargePaise` is persisted on the order (checkout.ts:504-ish, `codSurchargePaise: summary.codSurchargePaise`). Because the surcharge is never printed, a COD invoice's visible arithmetic is off by exactly `codSurchargePaise`. This document is shipped to the customer as a tax invoice via `invoiceUrl` (web/src/app/(shop)/account/orders/[id]/invoice/page.tsx:108 and app/lib/features/orders/invoice_screen.dart:24).",
+    "failure_scenario": "settings/delivery.codSurchargePaise = 3000. A COD order: subtotal \u20b9890, discount \u20b90, delivery \u20b950, GST \u20b90, codSurcharge \u20b930 -> totalPaise = \u20b9970. The generated invoice prints Subtotal \u20b9890.00, Discount -\u20b90.00, Delivery \u20b950.00, GST \u20b90.00, Total \u20b9970.00 \u2014 the lines add to \u20b9940 and the customer/auditor sees an unexplained \u20b930.",
+    "fix": "Add `<tr><td>COD charges</td><td class=\"r\">${inr(o.codSurchargePaise)}</td></tr>` (rendered only when > 0) before the GST row, and consider an informational 'Paid by wallet' line for `o.walletUsedPaise`."
+   },
+   {
+    "title": "Cancelling an order never releases the coupon it consumed \u2014 the spin coupon stays 'used' and the promotional redemption counters are never decremented",
+    "file": "functions/src/orders/cancel.ts",
+    "line": 146,
+    "severity": "medium",
+    "category": "broken-crud",
+    "detail": "`placeOrder` consumes the coupon at checkout.ts:566-614: a personal coupon is flipped to `status:'used'` with `usedOnOrderId`, and a promotional coupon gets `usesCount` incremented plus `customers/{uid}/couponUsage/{couponId}.count` incremented (the exact counters `computeCouponDiscount` reads at lines 149 and 153 to enforce `maxUsesTotal` / `maxUsesPerUser`). `performCancellation` restores stock, refunds the wallet, and reverses the affiliate commission \u2014 but contains no reference to `coupons`, `couponUsage`, or `appliedCoupon` at all. The order's `appliedCoupon` field (checkout.ts:510) carries `couponId` / `userCouponId`, so the information needed to reverse it is right there on the document being updated at line 146.",
+    "failure_scenario": "Customer wins a 20%-off spin coupon, applies it to a \u20b93,000 order, then cancels two minutes later (status is still 'accepted', so `cancelOrder` allows it). Stock is restored and the wallet is refunded, but `customers/{uid}/coupons/{id}.status` stays 'used' \u2014 the app's Coupons screen and web rewards page show it under Used and it can never be applied again. The customer has lost the prize with nothing to show for it. For a promotional coupon with `maxUsesPerUser: 1`, the cancelled order still burns the customer's single allowance: `computeCouponDiscount` line 153 will throw 'You have already used this coupon' on their next attempt.",
+    "fix": "In `performCancellation`, read `o.appliedCoupon` from the order snapshot (already loaded at line 46) and, in the write phase, restore `customers/{customerId}/coupons/{userCouponId}` to `status:'active'` with `usedAt/usedOnOrderId` cleared, and decrement `coupons/{couponId}.usesCount` and `customers/{customerId}/couponUsage/{couponId}.count` by 1."
+   },
+   {
+    "title": "applyCoupon drops the free_shipping flag, so a free-shipping coupon shows \u20b90 saved and the checkout screen keeps charging delivery",
+    "file": "functions/src/orders/checkout.ts",
+    "line": 315,
+    "severity": "medium",
+    "category": "cross-surface-mismatch",
+    "detail": "`computeCouponDiscount` returns a `waiveDelivery` flag for `discountType === 'free_shipping'` on both the promotional path (line 176) and the personal path (line 202), and `placeOrder` threads it into `summarise` at line 419 so the server genuinely zeroes `deliveryPaise` (line 286). But `applyCoupon` destructures only `{ discountPaise, label }` at line 314 and returns only those two fields at line 315. Both clients store exactly what comes back and nothing else \u2014 `web/src/app/(shop)/checkout/page.tsx:152` does `draft.set({ coupon: { code, discountPaise: res.discountPaise, label: res.label } })`, and `app/lib/features/checkout/coupon_screen.dart:46-52` does the same \u2014 so neither client's local summary can waive delivery. free_shipping is a first-class type in both writers: `admin/src/features/coupons/routes/CouponFormPage.tsx:30` offers it in the discount-type picker, and `spin/execute.ts:99,126` issues personal coupons with `discountType: 'free_shipping'`.",
+    "failure_scenario": "Customer wins a 'Free delivery' spin coupon (SPIN-XXXXX, discountType 'free_shipping'). At checkout they enter the code; applyCoupon succeeds and the toast says 'Coupon SPIN-XXXXX applied', but discountPaise is 0, so the order summary still shows 'You saved \u20b90' and Delivery \u20b949, total \u20b91,049. They press Place order; the server applies waiveDelivery and creates the order for \u20b91,000 \u2014 and for razorpay, `createRazorpayOrder` opens the gateway for \u20b91,000, not the \u20b91,049 the screen displayed. The coupon looks broken and the displayed total never matches the charged total.",
+    "fix": "Return `waiveDelivery` (and ideally the whole `CouponResult`) from `applyCoupon` at line 315, and have the web `computeSummary` / app `CheckoutDraft` honour it when deriving `deliveryPaise`, mirroring `summarise` at checkout.ts:286."
+   }
+  ]
+ },
+ "fn-rest": {
+  "count": 12,
+  "files": [
+   "functions/src/affiliate/withdrawals.ts",
+   "functions/src/catalog/inventory.ts",
+   "functions/src/notifications/broadcast.ts",
+   "functions/src/returns/decisions.ts",
+   "functions/src/returns/requests.ts",
+   "functions/src/spin/execute.ts"
+  ],
+  "findings": [
+   {
+    "title": "Return window is hardcoded to 3 days server-side but the storefront gates on the admin-configurable `settings/returns.windowDays` (default 7)",
+    "file": "functions/src/returns/requests.ts",
+    "line": 42,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "`requestReturnOrReplacement` hardcodes `RETURN_WINDOW_MS = 3 * 24 * 60 * 60 * 1000` and rejects anything older with 'The 3-day return window for this order has closed.' The web return page (web/src/app/(shop)/account/orders/[id]/return/page.tsx:23-25) gates on `returnWindow(order, returnSettings?.windowDays)` where `DEFAULT_RETURN_WINDOW_DAYS = 7` (web/src/components/account/orders.ts:246), and the admin writes that value in admin/src/features/settings/routes/StorefrontTab.tsx:296. Both `scripts/seed.ts:208` and `scripts/bootstrap-real.ts:117` seed `windowDays: 7`. The CF also hard-requires `o.deliveredAt` while `returnWindow()` falls back to `order.placedAt` when `deliveredAt` is missing, widening the gap. The admin's 'Return window (days)' input therefore controls nothing on the server, and nothing at all on the app (app/lib/features/orders/data/order.dart:202 hardcodes 3 too).",
+    "failure_scenario": "Order delivered 5 days ago, settings/returns.windowDays = 7 (the seeded default). Web /account/orders/{id}/return renders the full form and says returns can be raised within 7 days. The customer picks a reason and submits -> the CF throws failed-precondition -> `requestReturn` returns ok:false -> the page shows the generic \"We couldn't submit your return just now. Please try again.\" The customer retries forever and never learns the real reason.",
+    "fix": "Read `settings/returns.windowDays` inside `requestReturnOrReplacement` (falling back to 7, treating <=0 as returns-disabled) instead of the 3-day constant, and mirror the `deliveredAt ?? placedAt` fallback the web uses; make app/lib/.../order.dart read the same setting."
+   },
+   {
+    "title": "Approved returns refund the customer but never reverse the affiliate's confirmed commission",
+    "file": "functions/src/returns/decisions.ts",
+    "line": 103,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "`adminApproveOrderRequest` credits the refund to the wallet, writes the ledger row and stamps the request/item \u2014 the whole file contains zero references to `commissions` or `affiliate` (grep count 0 across all 182 lines). Meanwhile functions/src/affiliate/commissions.ts:11-14 documents the design as: \"Commission clears at delivery rather than after `commissionClearanceDays` \u2026 Returns are handled by the return flow, which is the case the clearance delay was protecting against.\" That claim is false \u2014 the return flow does nothing. `confirmCommissionsForOrder` (commissions.ts:107) has already moved the commission from `pendingBalancePaise` into `confirmedBalancePaise` on delivery, and `confirmedBalancePaise` is the withdrawable balance (requests.ts:39-40), so the money is immediately payable. cancel.ts:71-74 deliberately only reverses rows still `pending`, so no other path claws it back either.",
+    "failure_scenario": "Customer B (referred by affiliate A at 5%) orders \u20b920,000 of merchandise. Admin marks it delivered \u2192 A's confirmedBalancePaise += \u20b91,000. B raises a return; admin approves it \u2192 B is refunded \u20b920,000 to wallet. A still holds \u20b91,000 withdrawable and can immediately call requestWithdrawal for it. The business pays commission on goods it took back, with no ledger trace.",
+    "fix": "In the approve transaction, read `commissions` for `orderId` (query before the transaction, re-read each ref inside it), and for rows with status 'confirmed' write `status:'reversed'`/`cancellationReason` and `FieldValue.increment(-amount)` on `affiliate.confirmedBalancePaise` (and `lifetimeEarningsPaise`), pro-rating by the refunded fraction of the order for partial returns. Clamp at zero and record a shortfall if the affiliate already withdrew it."
+   },
+   {
+    "title": "Settings \u2192 Storefront return window is ignored by the server, which hardcodes 3 days",
+    "file": "functions/src/returns/requests.ts",
+    "line": 42,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "Admin writes `settings/returns.windowDays` via admin/src/features/settings/routes/StorefrontTab.tsx:296 \u2192 saveReturns (api/settings.ts:84). The storefront honours it: web/src/components/account/orders.ts:261 `returnWindow(order, returnSettings?.windowDays)` with a 7-day fallback, used to show/hide the Return button (web/src/app/(shop)/account/orders/[id]/page.tsx:71). But the callable that actually creates the return hardcodes `const RETURN_WINDOW_MS = 3 * 24 * 60 * 60 * 1000` and rejects anything older, and the Flutter app hardcodes its own value too (app/lib/features/orders/data/order.dart:202 `returnWindowDays = 3`). Nothing anywhere reads `settings/returns` on the server or in the app. Even the seeded default (scripts/seed.ts:208, `windowDays: 7`) already disagrees with the CF.",
+    "failure_scenario": "With the seeded default of 7 days (or an admin setting 14), a customer opens a delivered order 5 days after delivery. The web order page computes `open: true, daysLeft: 2` and renders 'Request return'. Submitting calls requestReturnOrReplacement, which throws failed-precondition 'The 3-day return window for this order has closed.' The customer sees a dead button; the admin's configured window has no effect at all.",
+    "fix": "Have requestReturnOrReplacement read `settings/returns` inside the transaction and use `windowDays` (falling back to 7) instead of the hardcoded 3 days, and make app/lib/.../order.dart read the same doc rather than the `returnWindowDays = 3` constant."
+   },
+   {
+    "title": "Return window is hardcoded to 3 days server-side, ignoring settings/returns.windowDays that the admin sets and the web enforces",
+    "file": "functions/src/returns/requests.ts",
+    "line": 42,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "`requestReturnOrReplacement` hardcodes `RETURN_WINDOW_MS = 3 * 24 * 60 * 60 * 1000` and rejects anything older (line 44). It never reads `settings/returns`. Meanwhile admin/src/features/settings/routes/StorefrontTab.tsx:295 lets an admin save `settings/returns.windowDays` (0-90, default 7) via `saveReturns`, and web/src/components/account/orders.ts:261 `returnWindow()` uses that value \u2014 falling back to `DEFAULT_RETURN_WINDOW_DAYS = 7` (line 246) \u2014 to decide whether to show the 'Return item' button and the 'N days left' copy (web/src/app/(shop)/account/orders/[id]/page.tsx:71). The Flutter app hardcodes its own third value, `returnWindowDays = 3` (app/lib/features/orders/data/order.dart). So three surfaces disagree, and the admin setting is write-only.",
+    "failure_scenario": "Admin sets the return window to 7 days (or leaves settings/returns unset, so the web default of 7 applies). An order delivered 5 days ago shows 'Return item \u00b7 2 days left' on the web account page. The customer fills in the reason and submits; requestReturnOrReplacement throws failed-precondition 'The 3-day return window for this order has closed.' No return can ever be created between day 3 and day 7. Conversely, setting windowDays = 0 to disable returns still lets the CF accept returns for 3 days.",
+    "fix": "Read `settings/returns.windowDays` inside `requestReturnOrReplacement` (defaulting to the same 7 the web uses) and use it for the window check; have the Flutter `Order.canReturn` fetch the same setting instead of its hardcoded 3."
+   },
+   {
+    "title": "Approving a return refunds the customer but never reverses the affiliate commission that was already confirmed at delivery",
+    "file": "functions/src/returns/decisions.ts",
+    "line": 116,
+    "severity": "medium",
+    "category": "incomplete",
+    "detail": "`affiliate/commissions.ts:10-14` states the design explicitly: 'Commission clears at delivery rather than after commissionClearanceDays ... Returns are handled by the return flow, which is the case the clearance delay was protecting against.' But `adminApproveOrderRequest` contains no reference to `commissions` or to `affiliate.*` anywhere \u2014 it updates the request, the customer wallet, and the order (`refundedPaise`, `paymentStatus`, `items[].returnStatus`) and stops. Since returns are only possible on delivered orders (`returns/requests.ts:39`), and delivery is exactly the moment `confirmCommissionsForOrder` moves the commission from `pendingBalancePaise` into `confirmedBalancePaise` (the withdrawable balance, commissions.ts:129-133), every approved return leaves the affiliate holding withdrawable commission on merchandise that has been refunded. The `commissions` doc's `cancellationReason` field (commissions.ts:88) is written as null at accrual and never set by any code path other than cancel.ts.",
+    "failure_scenario": "Customer C (referred by affiliate A, 5% rate) orders a \u20b920,000 item. On delivery, A's \u20b91,000 commission moves to `affiliate.confirmedBalancePaise`. Within the 3-day window C requests a return; the admin approves it and \u20b920,000 is credited back to C's wallet. A's \u20b91,000 remains withdrawable, A submits `requestWithdrawal` and the admin pays it out. The business has refunded the full order value and additionally paid \u20b91,000 of commission on a sale that no longer exists.",
+    "fix": "In the approve transaction, read the `commissions` docs for `r.orderId` before the writes (query outside the transaction as `cancel.ts:37-40` does) and debit the affiliate's `confirmedBalancePaise` / `lifetimeEarningsPaise` by the pro-rata share of the returned line (refund amount \u00f7 eligible merchandise value \u00d7 commissionPaise), stamping the commission row with a `returned`/partial status and a `cancellationReason`."
+   },
+   {
+    "title": "Admin \"Grant spins\" is cosmetic \u2014 executeSpin never gates on spinsRemaining",
+    "file": "functions/src/spin/execute.ts",
+    "line": 93,
+    "severity": "high",
+    "category": "dead-button",
+    "detail": "executeSpin reads `spinsRemaining` (line 93) and decrements it with a `Math.max(0, remaining - 1)` floor (line 110), but never blocks when it is 0 \u2014 the only gate is the campaign-level `spinsPerDay` daily cap counted from spinHistory (lines 74-88). The comment on line 108 admits it: \"the daily cap above is the real gate, so this never blocks\". adminGrantSpins (functions/src/spin/grant.ts:31) is the sole writer, and both clients ignore the field: app/lib/features/spin/data/spin_repository.dart:37 derives spins left purely from `spinsPerDay - usedToday`, and web/src/app/(shop)/account/rewards/page.tsx:66-75 does the same. Every customer doc is created with `spinsRemaining: 0` (web/src/lib/customerDoc.ts:51, app/lib/features/auth/data/auth_repository.dart:233), yet all of them can still spin.",
+    "failure_scenario": "Campaign has spinsPerDay=1. Admin opens a customer, types 5, clicks \"Grant spins\" (admin/src/features/customers/routes/CustomerProfilePage.tsx:175); the card shows 5 and toasts \"Granted 5 spins\". The customer still gets exactly 1 spin today, and the balance silently drops to 4. Conversely \"Clear balance\" (line 181) sets it to 0 and the customer still spins normally \u2014 the privileged action changes nothing.",
+    "fix": "Either enforce the granted balance in executeSpin (treat spinsRemaining as bonus spins beyond spinsPerDay, and reject when both the daily cap and the balance are exhausted), or remove the grant/revoke UI and the adminGrantSpins callable so admins are not told they changed something they did not."
+   },
+   {
+    "title": "Campaign `eligibility` is written by admin but never enforced by executeSpin",
+    "file": "functions/src/spin/execute.ts",
+    "line": 56,
+    "severity": "high",
+    "category": "security",
+    "detail": "Both admin screens persist `eligibility` (admin/src/features/spinner/api/spinner.ts:123 on create, :145 on save) with options all/new/existing/affiliates/segment (CreateCampaignPage.tsx:14-20). executeSpin validates only `status` (line 56) and the date window (line 59) \u2014 it never loads the customer's affiliate flag, order count or signup date. A repo-wide grep for `eligibility` returns only the shared type, the two admin files and seed.ts: no function, no web page, no Dart file ever reads it.",
+    "failure_scenario": "Admin creates an \"Affiliates only\" wheel with a \u20b9500-off slice and activates it. Any signed-in customer opens Rewards (web) or the Spin screen (app) \u2014 activeCampaign() filters on status only \u2014 calls executeSpin and wins the affiliate-only coupon, which checkout then honours from customers/{uid}/coupons.",
+    "fix": "In executeSpin, after the status/window checks, load customers/{uid} and reject with failed-precondition when camp.eligibility is 'affiliates' and `affiliate.enabled != true`, 'new' and stats.totalOrders > 0, 'existing' and stats.totalOrders == 0; the clients should apply the same filter when choosing the active campaign."
+   },
+   {
+    "title": "Spin cashback wallet ledger row records balanceAfterPaise: 0",
+    "file": "functions/src/spin/execute.ts",
+    "line": 144,
+    "severity": "medium",
+    "category": "cross-surface-mismatch",
+    "detail": "Every other writer of customers/{uid}/walletTransactions stores the real post-transaction balance \u2014 wallet/topup.ts:98, wallet/adjust.ts:57, orders/cancel.ts:121, orders/checkout.ts:581, returns/decisions.ts:89. executeSpin hardcodes `balanceAfterPaise: 0` on the spin_reward credit even though it increments wallet.balancePaise by the same amount two lines earlier (line 114). The value is computable here: the transaction already has custSnap, so `Number(custSnap.get('wallet.balancePaise') ?? 0) + cashbackAmt` is available.",
+    "failure_scenario": "Customer with \u20b9800 in wallet wins \u20b950 spin cashback. The wallet balance correctly becomes \u20b9850, but the ledger row for that credit claims the running balance was \u20b90 \u2014 any reconciliation, export or future running-balance display over walletTransactions breaks at every spin-reward row, and the ledger contradicts the customer doc.",
+    "fix": "Compute the post-credit balance from the customer snapshot already read in the transaction and store it, matching the other five wallet writers."
+   },
+   {
+    "title": "adminAllocateAffiliate / adminRevokeAffiliate rewrite the whole affiliate map outside a transaction, clobbering concurrent commission increments",
+    "file": "functions/src/affiliate/withdrawals.ts",
+    "line": 32,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "Both callables do a plain `ref.get()` (line 27 / 53) and then `ref.update({ affiliate: { ...existing, ... } })` (line 32-42 and line 55) \u2014 a non-atomic read-modify-write of the entire `affiliate` map. Every other writer of that map uses field-path increments: accrueCommission (functions/src/affiliate/commissions.ts:93-97) does `'affiliate.pendingBalancePaise': FieldValue.increment(...)`, confirmCommissionsForOrder does the same for pending/confirmed/lifetime (commissions.ts:129-134). A whole-map set based on a stale read silently reverts any increment that landed in between.",
+    "failure_scenario": "Affiliate has pendingBalancePaise = 0. Admin taps the affiliate toggle (revoke) at the same moment a referred customer places an order: the checkout transaction increments pendingBalancePaise to 25000, then adminRevokeAffiliate writes back `{...existing(stale, pending=0), enabled:false}` \u2014 the \u20b9250 commission row exists in `commissions` but the affiliate's pending balance is 0, so it can never be confirmed into confirmedBalancePaise (the withdrawable balance).",
+    "fix": "Wrap both callables in db.runTransaction (read the customer doc inside the tx) and/or write only the fields that change using field paths \u2014 `'affiliate.enabled': false`, `'affiliate.commissionRate': rate` \u2014 instead of replacing the whole map."
+   },
+   {
+    "title": "walletEnabled is accepted by adminAllocateAffiliate and never persisted \u2014 the allocate screen's toggle is a no-op",
+    "file": "functions/src/affiliate/withdrawals.ts",
+    "line": 20,
+    "severity": "low",
+    "category": "dead-button",
+    "detail": "The schema at line 20 accepts `walletEnabled: z.boolean().optional()` but line 23 destructures only `{ uid, commissionRate }`, and the `ref.update` at lines 32-42 writes no wallet-access flag anywhere on the customer doc. admin/src/features/affiliate/routes/AllocateAffiliatePage.tsx:115 renders an 'Enable affiliate wallet access' Toggle bound to that value and line 55 sends it; the confirm dialog at line 130 even promises '\u2026and affiliate wallet access'.",
+    "failure_scenario": "Admin turns the 'Enable affiliate wallet access' toggle OFF and allocates. The confirmation text says wallet access is withheld, but the customer doc gets the standard affiliate map with pending/confirmed/withdrawn balances and the customer's affiliate wallet works exactly as if the toggle were ON. Nothing in the system can ever read the flag back.",
+    "fix": "Either persist it (`affiliate.walletEnabled: walletEnabled ?? true`) and honour it in the withdrawal/commission paths, or drop the field from the schema and remove the toggle from the allocate screen."
+   },
+   {
+    "title": "adminAdjustStock silently skips SKUs it cannot resolve, and the client's no-results fallback then writes a fabricated history row and toasts success",
+    "file": "functions/src/catalog/inventory.ts",
+    "line": 60,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "Inside the transaction, a missing product doc is skipped with `if (!snap.exists) return;` (line 60) and a variant id not present in `p.variants` is skipped by `if (!d) return v;` (line 78). In both cases nothing is pushed to `results`, yet the function still returns `{ ok: true, count: adjustments.length }` (line 98) - `count` is the number of SKUs *requested*, not applied, so the caller cannot detect the skip from it either. On the client, api/inventory.ts:102-110 treats a missing entry in `moved` as \"an older callable build is still deployed\" and falls back to `known`/`Math.max(0, known + a.delta)` computed from the stale local `products` array, writing a stockAdjustments row that asserts a stock change which never occurred. AdjustStockPage.tsx:73 then toasts \"Stock adjusted for N SKUs\" and navigates away. The legacy-build fallback and the real-skip case are indistinguishable, so a genuine no-op is never reported.",
+    "failure_scenario": "Admin opens Adjust stock, sets +10 on product p12. Before the save round-trip lands, p12 is deleted (or its variant v3 is removed by a concurrent product edit). The transaction hits `!snap.exists` / `!d` and does nothing; `results` is empty. The client writes stockAdjustments {productId:'p12', before:4, delta:10, after:14} and shows \"Stock adjusted for 1 SKU\". Inventory is unchanged, and the Stock history modal now shows a change that never happened.",
+    "fix": "Have the CF report skips explicitly (e.g. return `skipped: [{productId, variantId, reason}]` and/or throw `not-found` when nothing was applied), and on the client only emit a ledger row for SKUs present in `results`; surface any skipped SKU to the admin instead of falling back to locally-cached stock."
+   },
+   {
+    "title": "broadcasts.opened is written once as 0 and never updated, so the Opened column is always 0",
+    "file": "functions/src/notifications/broadcast.ts",
+    "line": 46,
+    "severity": "medium",
+    "category": "missing-state",
+    "detail": "The CF sets `opened: 0` at create; firestore.rules:221 makes broadcasts CF-write-only (`allow write: if false`) and no function ever updates the doc afterwards. The per-user inbox docs carry `broadcastId` (line 58) but the app's read-receipt path only flips `read` on customers/{uid}/notifications (app/lib/features/notifications/notifications_screen.dart:165 \u2192 markRead, permitted by firestore.rules:166-169) and never touches the broadcast aggregate. The admin list renders an \"Opened\" column from this field (NotificationsListPage.tsx:101).",
+    "failure_scenario": "Admin sends a broadcast to 12,000 users; 4,000 open it in the app. The Push-notifications table permanently shows Sent 12,000 / Opened 0, so campaign effectiveness reads as zero for every broadcast ever sent.",
+    "fix": "Either aggregate opens server-side (a Firestore trigger on customers/{uid}/notifications update that increments broadcasts/{broadcastId}.opened when read flips to true) or remove the Opened column rather than displaying a metric that is structurally always 0."
+   }
+  ]
+ },
+ "app-checkout": {
+  "count": 7,
+  "files": [
+   "app/lib/features/checkout/add_address_screen.dart",
+   "app/lib/features/checkout/checkout_screen.dart",
+   "app/lib/features/checkout/data/checkout_repository.dart",
+   "app/lib/features/checkout/payment_screen.dart",
+   "app/lib/features/checkout/widgets/coupon_apply.dart"
+  ],
+  "findings": [
+   {
+    "title": "App's add/edit address screen has no state or pincode input, so app-created addresses persist `state: ''` and `pincode: ''`",
+    "file": "app/lib/features/checkout/add_address_screen.dart",
+    "line": 90,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "The screen only collects a label, `Flat / building` (-> line1) and `Area` (-> city). At save it hardcodes `state: widget.existing?.state ?? ''` and `pincode: widget.existing?.pincode ?? ''` (lines 90-91), so any address created in the app has empty state/pincode forever (editing it in the app can never fill them either). The web form writing the same `customers/{uid}.addresses` array validates both as required \u2014 web/src/app/(shop)/account/addresses/new/page.tsx:15 `PIN_RE = /^\\d{6}$/` and errors.state/errors.pincode. functions/src/orders/checkout.ts:511 embeds the chosen address verbatim as `deliveryAddress`, and functions/src/orders/invoice.ts:44 renders `${addr.city} ${addr.pincode}`.",
+    "failure_scenario": "An app-only customer adds \"Apt 1204\" / \"Kakkanad\" and checks out. The order's `deliveryAddress.pincode` is \"\", `state` is \"\"; the generated invoice's Bill-to block prints the city with no pincode, the admin order screen shows an address with no PIN, and the parcel cannot be routed. The same customer's address created on the web has a valid pincode \u2014 the two surfaces produce structurally different records in the same array.",
+    "fix": "Add State and Pincode fields (6-digit validation, mirroring PIN_RE) plus name/phone as on the web form, and require them before enabling Save."
+   },
+   {
+    "title": "Timeout-recovery path touches BuildContext after an await with no mounted check, and throws from inside a catch block",
+    "file": "app/lib/features/checkout/checkout_screen.dart",
+    "line": 147,
+    "severity": "high",
+    "category": "crash-risk",
+    "detail": "`_placeOrder` awaits `_repo.placeOrder` with a 120s callable timeout (checkout_repository.dart:274). On `deadline-exceeded`/`unavailable` it calls `_recoverTimedOutOrder`, whose FIRST statement is `final uid = context.read<AuthProvider>().uid;` (line 147) \u2014 before any `mounted` check (the only `if (!mounted)` is at line 153, after the await). `State.context` dereferences `_element!`, which is null once the element is unmounted, so this throws. Worse, it throws from inside the `on FirebaseFunctionsException catch` block, so the following `catch (_)` at line 134 does NOT catch it \u2014 the error escapes `_placeOrder` entirely as an unhandled async exception and `_placing` is never reset. Unlike PaymentScreen (payment_screen.dart:218 wraps the body in `PopScope(canPop: !_processing)`), CheckoutScreen has no pop guard, so the user can freely back out during the 120s window.",
+    "failure_scenario": "User taps 'Place order \u00b7 \u20b91,299' on Checkout; the callable stalls (cold start + poor network). While it is in flight the user taps the back arrow (checkout_screen.dart:227 `context.pop()`), unmounting `_CheckoutScreenState`. 120s later the call fails with `deadline-exceeded`; `_recoverTimedOutOrder` runs, `context.read<AuthProvider>()` dereferences a null element and throws a TypeError that no handler catches. The order may in fact have committed server-side, but the recovery lookup never runs, so nothing tells the user and nothing clears the bag.",
+    "fix": "Capture the uid before the await (alongside `cart`/`draft` in `_placeOrder`) and pass it into `_recoverTimedOutOrder`, or add `if (!mounted) return false;` as the first line of `_recoverTimedOutOrder`. Additionally wrap the checkout body in `PopScope(canPop: !_placing, ...)` the way PaymentScreen already does."
+   },
+   {
+    "title": "placeOrder auto-applies the best coupon server-side, but the app never applies it to the draft \u2014 displayed total is higher than what is charged and a spin coupon is silently consumed",
+    "file": "app/lib/features/checkout/checkout_screen.dart",
+    "line": 108,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "`_placeOrder` sends `couponCode: draft.coupon?.code` (line 108), which is null whenever the customer has not tapped 'Apply'. Server-side, `placeOrder` treats a null code as an instruction to auto-apply: `couponCode ? computeCouponDiscount(...) : await autoBestOffer(uid, subtotalPaise)` (functions/src/orders/checkout.ts:347-349). `autoBestOffer` scans `customers/{uid}/coupons` and marks the winner used (`status:'used'`, checkout.ts:567-572) and increments promo counters. The web client compensates for this: checkout/page.tsx:84-95 has a `useEffect` that auto-applies `bestOfferForCart` into the draft on mount ('Auto-applied best offer'), so its summary matches. The app only renders a passive `CouponRewardBanner` that requires an explicit tap (coupon_apply.dart:85-95); nothing writes the auto-offer into `CheckoutDraft`, so `computeSummary` shows no discount.",
+    "failure_scenario": "Customer holds a spin reward 'SPIN200 \u00b7 \u20b9200 off \u00b7 min \u20b9500'. They open Checkout on a \u20b91,000 COD cart and ignore the gold banner. The pay bar reads 'Place order \u00b7 \u20b91,000' and the summary shows no Discount row. `placeOrder` runs `autoBestOffer`, applies SPIN200, creates the order at \u20b9800, and flips the spin coupon to `status:'used'`. The customer sees \u20b91,000 on checkout, \u20b9800 on confirmation, and their one-time spin reward is gone without them ever choosing to spend it.",
+    "fix": "Mirror the web behaviour: on Checkout, once offers have loaded and `draft.coupon == null` and subtotal > 0, auto-apply `listAvailableOffers(...).firstWhere(qualifies && discount>0)` into `CheckoutDraft` once (guarded by a `_autoTried` flag so a manual removal is respected). Alternatively send an explicit `couponCode: ''`/opt-out flag so the server does not auto-apply behind the UI."
+   },
+   {
+    "title": "findOrderByNonce returns totalPaise as the order amount while the normal path returns payablePaise \u2014 recovered orders overstate the COD amount due by the wallet amount",
+    "file": "app/lib/features/checkout/data/checkout_repository.dart",
+    "line": 313,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "The normal `placeOrder` return maps `amountPaise` from the callable's `summary.payablePaise` (functions/src/orders/checkout.ts:619, i.e. total AFTER the wallet debit). The just-added recovery path builds `PlacedOrder` from the order document with `amountPaise: (data['totalPaise'] as num?)?.toInt() ?? 0` (line 313) \u2014 `totalPaise` is the pre-wallet total (checkout.ts:503; the post-wallet figure is `totalPaise - walletUsedPaise`). `OrderConfirmationScreen` renders this value verbatim as '\u20b9X due on delivery' / '\u20b9X paid' (order_confirmation_screen.dart:92, 204-205). The CF's own idempotency replay has the same defect: it returns `prior.amountPaise`, which was stored as `summary.totalPaise` (checkout.ts:555 vs 619), so payment_screen's retry path is affected too.",
+    "failure_scenario": "COD order: subtotal \u20b91,000, wallet balance \u20b9400 applied \u2192 totalPaise \u20b91,000, walletUsedPaise \u20b9400, payablePaise \u20b9600. `placeOrder` times out but commits. `_recoverTimedOutOrder` finds it via `findOrderByNonce` and routes to confirmation, which displays '\u20b91,000 due on delivery' instead of \u20b9600 \u2014 telling the customer to hand the delivery agent \u20b9400 more than they owe. Same wrong figure appears after a cancelled-then-retried Razorpay payment, where the CF replay returns totalPaise.",
+    "fix": "In `findOrderByNonce`, compute `amountPaise: (totalPaise - walletUsedPaise).clamp(0, totalPaise)` reading both fields from the order doc. Also change the CF replay return (checkout.ts:386) to store/return `payablePaise` so the replay shape matches the first-placement shape."
+   },
+   {
+    "title": "Payment-gateway settings default to disabled in the app but enabled on web \u2014 a partially configured settings doc hides wallet and online payment only in the app",
+    "file": "app/lib/features/checkout/data/checkout_repository.dart",
+    "line": 181,
+    "severity": "medium",
+    "category": "cross-surface-mismatch",
+    "detail": "`fetchSettings` reads `walletEnabled: (g['walletEnabled'] as bool?) ?? false` (line 181) and `onlinePaymentEnabled: (g['onlinePaymentEnabled'] as bool?) ?? false` (line 182), and the `StoreSettings` defaults used when the fetch throws are also `false` (lines 21-22). The web reads the same doc with the opposite fallback: `onlineEnabled = gateway?.onlinePaymentEnabled ?? true` and `walletEnabled = gateway?.walletEnabled ?? true` (web/src/app/(shop)/checkout/page.tsx:117-118), documented there as 'A missing settings doc means \"everything on\"'. checkout_screen.dart:250 carries that same comment ('missing settings \u21d2 everything on') while the code does the opposite. Only `onlinePaymentEnabled` has an accidental rescue (`|| s.razorpayKeyId.isNotEmpty`, line 254); the wallet has none.",
+    "failure_scenario": "`settings/paymentGateway` exists but predates the wallet toggle (or `_loadSettings` throws once on a flaky first load, falling back to `const StoreSettings()`). On web the customer sees the 'Use wallet balance' switch and can spend their \u20b9500 wallet; in the app the wallet card never renders (`walletEnabled = false && ...`) and `draft.useWallet` is force-reset to false by the post-frame callback at line 279-282, so the same customer cannot spend their wallet at all and is charged the full amount.",
+    "fix": "Change the fallbacks in `fetchSettings` and the `StoreSettings` field defaults for `walletEnabled`, `onlinePaymentEnabled` (and `codEnabled`, already true) to `true`, matching the web's documented 'missing settings \u21d2 everything on' contract."
+   },
+   {
+    "title": "Applied coupon discount is a frozen snapshot \u2014 editing quantities after applying shows a wrong discount and can make placeOrder hard-fail",
+    "file": "app/lib/features/checkout/widgets/coupon_apply.dart",
+    "line": 87,
+    "severity": "medium",
+    "category": "incomplete",
+    "detail": "`CouponRewardBanner`'s Apply writes `AppliedCoupon(code: best.code, discountPaise: best.discountPaise, ...)` (lines 87-92) where `best.discountPaise` was computed by `listAvailableOffers` against the subtotal at that instant; `CouponScreen._applyOffer` does the same (coupon_screen.dart:69-73). Nothing recomputes it when the cart changes \u2014 `CheckoutDraft.coupon` is a plain field (checkout_draft.dart:13) and `computeSummary` only clamps it with `.clamp(0, subtotalPaise)` (checkout_repository.dart:196). The app makes this trivially reachable because the Bag screen renders the quantity steppers and `CouponRewardBanner`/`CouponRow` in the same scrolling list (bag_screen.dart:110-115), so applying and then editing quantities is a two-tap sequence on one screen. `placeOrder` re-derives the discount from the live cart and throws `failed-precondition` if the minimum is no longer met (functions/src/orders/checkout.ts:143-145, 187).",
+    "failure_scenario": "Customer with a \u20b91,200 bag taps Apply on 'SPIN200 \u00b7 \u20b9200 off \u00b7 min cart \u20b91,000'. Still on the Bag screen, they decrement a \u20b9400 item to bring the bag to \u20b9800. The bag total and the checkout summary still show '\u2212\u20b9200' and the pay bar still reads 'Place order \u00b7 \u20b9600'. Tapping it calls placeOrder, which rejects with 'Your cart does not meet this coupon\u2019s minimum.' \u2014 an error toast with no indication that the coupon is the problem and no way forward except guessing to clear the coupon. A percent coupon shows the wrong amount instead (10% applied at \u20b91,000 stays '\u2212\u20b9100' after the cart grows to \u20b95,000, while the server charges \u2212\u20b9500).",
+    "fix": "Store only the coupon code/metadata in `CheckoutDraft` and recompute `discountPaise` from the current `subtotalPaise` on every build (re-running the same `offers.dart` math for the applied code), clearing the coupon with a toast when the cart drops below its minimum."
+   },
+   {
+    "title": "UPI / Card selection on the Payment screen is a no-op \u2014 the choice is never passed to the Razorpay checkout",
+    "file": "app/lib/features/checkout/payment_screen.dart",
+    "line": 127,
+    "severity": "low",
+    "category": "dead-button",
+    "detail": "`_method` is initialised to `'upi'` (line 45) and mutated by both `_methodCard` handlers via `setState(() => _method = value)` (line 417), which only repaints the selection ring. `_openCheckout` builds the Razorpay options map at lines 127-137 with `key`, `order_id`, `amount`, `currency`, `name`, `description`, `prefill`, `theme`, `retry` \u2014 `_method` is never read, and no `method` map or `prefill['method']` is supplied. The field is not sent to `placeOrder` either (lines 81-88). It is therefore a two-option control that changes nothing about the payment flow.",
+    "failure_scenario": "Customer taps the 'Card \u00b7 Visa \u00b7 Mastercard \u00b7 Amex' row (the ring moves to Card), then taps 'Pay \u20b91,299'. The native Razorpay sheet opens on its own default landing tab with every method enabled \u2014 UPI included \u2014 exactly as it would have had they left 'UPI' selected. The user's explicit choice has no effect on what they are shown.",
+    "fix": "Pass the selection through to Razorpay: add `'method': {'upi': _method == 'upi', 'card': _method == 'card', 'netbanking': false, 'wallet': false}` (or `'prefill': {..., 'method': _method}`) to the options map in `_openCheckout`, so the selected instrument is the one the gateway opens on."
+   }
+  ]
+ },
+ "app-rest": {
+  "count": 13,
+  "files": [
+   "app/lib/core/services/cart_provider.dart",
+   "app/lib/features/auth/create_profile_screen.dart",
+   "app/lib/features/catalog/categories_screen.dart",
+   "app/lib/features/catalog/product_details_screen.dart",
+   "app/lib/features/catalog/product_list_screen.dart",
+   "app/lib/features/notifications/data/notifications_repository.dart",
+   "app/lib/features/notifications/notifications_screen.dart",
+   "app/lib/features/orders/data/order.dart",
+   "app/lib/features/orders/invoice_screen.dart",
+   "app/lib/features/profile/edit_profile_screen.dart",
+   "app/lib/features/settings/data/content_repository.dart",
+   "app/lib/features/spin/data/spin_repository.dart",
+   "app/lib/features/wishlist/data/wishlist.dart"
+  ],
+  "findings": [
+   {
+    "title": "Reviews screen is unreachable for any product with zero reviews, so no product can ever receive its first app review",
+    "file": "app/lib/features/catalog/product_details_screen.dart",
+    "line": 188,
+    "severity": "high",
+    "category": "dead-button",
+    "detail": "`_reviewsSummary(context)` is the ONLY place in the whole app that pushes `/product/:id/reviews` (line 484 \u2014 confirmed by grep across app/lib), and it is rendered behind `if (p.ratingCount > 0)` at line 188. Inside it, line 488-489 reads `p.ratingCount > 0 ? 'See all N' : 'Write a review'` \u2014 the `'Write a review'` branch is unreachable dead code, because the widget only renders when ratingCount > 0. `products.ratingCount` is only ever incremented when an admin APPROVES a review (admin/src/features/reviews/api/reviews.ts:59-64) or typed by hand in the product form (ProductFormPage.tsx:223); nothing else writes it, and the web has no review form at all.",
+    "failure_scenario": "Admin publishes a new product; `ratingCount` is 0 (admin/src/features/products/api/products.ts:200). A customer opens the product in the app \u2014 there is no 'Ratings & reviews' section and no link to `/product/{id}/reviews`, so `ReviewsScreen` and its fully-working `_WriteReviewSheet` are dead. Because ratingCount only rises after an approved review exists, and the only way to submit one is through that unreachable screen, the product is permanently stuck at 0 reviews. The entire reviews feature is inert for every new product.",
+    "fix": "Render the reviews section unconditionally (drop the `p.ratingCount > 0` guard at line 188) so the `'Write a review'` label at line 489 becomes reachable; keep the numeric summary block (lines 497-527) behind the ratingCount check if a zero-star block is undesirable."
+   },
+   {
+    "title": "Categories tab re-subscribes an unbounded whole-catalog listener on every keystroke of the category search box",
+    "file": "app/lib/features/catalog/categories_screen.dart",
+    "line": 97,
+    "severity": "high",
+    "category": "perf",
+    "detail": "Both `stream: _repo.categories()` (line 73) and the nested `stream: _repo.categoryCounts()` (line 97) are constructed inside `build()`. The search field's `onChanged: (v) => setState(() => _query = v)` (line 178) rebuilds the whole screen on every character typed, producing new Stream objects each time, so both StreamBuilders tear down and re-listen. `CatalogRepository.categoryCounts()` (app/lib/features/catalog/data/catalog_repository.dart:65) is `products.where('status','published').snapshots()` with NO `limit` \u2014 a full-collection real-time listener over the entire published catalog. Filtering is purely in-memory (`_filter`, line 53), so re-subscribing gains nothing.",
+    "failure_scenario": "User opens Categories, taps search and types 'sweets' (6 characters). Each keystroke re-issues both listens; the app performs 6 extra full reads of the `categories` collection AND 6 extra full reads of every published product document just to filter a locally-held list. On a 2,000-product catalog that is ~12,000 extra document reads for one search term, plus the grid flashing back to `_CategoriesSkeleton` (line 79) each time `snap.hasData` resets to false.",
+    "fix": "Make both streams `late final` fields (as `SearchScreen` already does at app/lib/features/search/search_screen.dart:49-50) so they are created once per State, and add a bounded/aggregate strategy for `categoryCounts()` instead of listening to the whole `products` collection."
+   },
+   {
+    "title": "Pull-to-refresh during an in-flight page load silently drops the first page and leaves the cursor mid-catalogue",
+    "file": "app/lib/features/catalog/product_list_screen.dart",
+    "line": 112,
+    "severity": "medium",
+    "category": "broken-crud",
+    "detail": "`_refresh()` clears `_items`, nulls `_cursor` and resets `_hasMore`, then awaits `_loadMore()`. But `_loadMore` opens with `if (_loading || !_hasMore) return;` (line 78), so when a prefetch triggered by `_onScroll` (line 71-75) is still in flight, `_refresh`'s call is a no-op and the RefreshIndicator completes with an empty grid. The still-running prefetch captured `var cursor = _cursor` at line 88 BEFORE the reset, and on completion does `_items.addAll(gained); _cursor = cursor;` (lines 98-99), repopulating the list from where the old cursor left off.",
+    "failure_scenario": "Catalogue has 90 published products. User scrolls the 'All products' grid; the prefetch for page 2 (products 31-60) fires and `_loading` is true. Mid-flight the user pulls to refresh. `_items` is cleared but `_loadMore` bails. The in-flight page then lands: the grid now contains only products 31-60 and `_cursor` points at product 60, so products 1-30 are permanently missing from the list and further scrolling appends 61-90 after them. A second pull-to-refresh is required to recover.",
+    "fix": "Make `_refresh` cancel/ignore in-flight work: bump a generation counter in `_refresh`, capture it in `_loadMore`, and discard the result in the `setState` at line 96-102 if the counter changed. Also drop the `_loading` early-return for the refresh path (or `await` the in-flight future before resetting)."
+   },
+   {
+    "title": "Spin-coupon discount is counted twice in the order detail and invoice totals",
+    "file": "app/lib/features/orders/data/order.dart",
+    "line": 189,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "`placeOrder` derives spinRewardPaise FROM discountPaise, it is not an additional reduction: functions/src/orders/checkout.ts:352-353 `const spinRewardPaise = userCouponId && userCouponSource === 'spin' ? Math.max(0, discountPaise) : 0;` and the order doc is then written with `discountPaise: summary.discountPaise` (checkout.ts:497) and `spinRewardPaise` (checkout.ts:498), where `summarise()` returns the same discountPaise it was given unchanged (checkout.ts:302). The app treats them as two independent reductions and adds them: `deductionPaise => discountPaise + spinRewardPaise + walletUsedPaise` (order.dart:189) and `discountsExWalletPaise => discountPaise + spinRewardPaise` (order.dart:194). Those getters drive the only money-reduction line on both money screens: order_detail_screen.dart:396-400 (\"Discounts applied\") and invoice_screen.dart:179-180 (the single deduction line on the tax invoice).",
+    "failure_scenario": "Customer wins a spin coupon and redeems it for Rs 100 off a Rs 1000 order. Firestore stores discountPaise=10000 and spinRewardPaise=10000 (same money). Order detail shows 'Discounts applied -Rs 200.00' and the invoice shows 'Discount + Spin reward -Rs 200.00', i.e. double the discount the customer actually received, while 'Total paid' still shows the real total - the invoice no longer reconciles.",
+    "fix": "Treat spinRewardPaise as a labelling flag, not an amount: make `deductionPaise => discountPaise + walletUsedPaise` and `discountsExWalletPaise => discountPaise`, and use `spinRewardPaise > 0` only to choose the label ('Spin reward' vs 'Discount'). Alternatively stop writing the duplicate value in checkout.ts and make spinRewardPaise a disjoint component."
+   },
+   {
+    "title": "App tax invoice omits delivery and COD surcharge, so the printed figures never add up",
+    "file": "app/lib/features/orders/invoice_screen.dart",
+    "line": 179,
+    "severity": "medium",
+    "category": "cross-surface-mismatch",
+    "detail": "The invoice card renders line items, then only a deduction line (invoice_screen.dart:179-183) and a tax line (invoice_screen.dart:184-186), then 'Total paid' (invoice_screen.dart:193-206). `order.deliveryPaise` and `order.codSurchargePaise` are parsed in the model (order.dart:229-230) but are never rendered anywhere in the app. The web invoice for the same order DOES render a Delivery row (web/src/app/(shop)/account/orders/[id]/invoice/page.tsx:78-83), so the two surfaces print different invoices for the same document.",
+    "failure_scenario": "COD order: subtotal Rs 500, delivery Rs 49, COD surcharge Rs 20, no tax, total Rs 569. The app invoice lists 'Item x 1  Rs 500.00' and then 'Total paid  Rs 569.00' with Rs 69 completely unexplained; the same order viewed on the web shows the Rs 49 delivery row.",
+    "fix": "Add the missing rows to the invoice card (delivery when `order.deliveryPaise > 0`, COD charge when `order.codSurchargePaise > 0`), matching the web invoice's row set so both surfaces reconcile to Total paid."
+   },
+   {
+    "title": "Notification deep links of type 'url' are a silent no-op \u2014 the admin's \"Custom URL\" broadcast option produces a dead card",
+    "file": "app/lib/features/notifications/notifications_screen.dart",
+    "line": 181,
+    "severity": "medium",
+    "category": "dead-button",
+    "detail": "`_onTap` switches on `n.deepLinkType` and handles only `product`, `category`, `home`; `default: break; // url / none \u2014 no in-app destination` (lines 167-183). The admin panel offers `url` as a first-class deep-link type (`DEEP_LINK_TYPES` in admin/src/features/notifications/api/notifications.ts:118-123, with a \"Enter a URL to link to\" validation at NotificationCreatePage.tsx:81) and `adminSendBroadcastNotification` persists it verbatim as `deepLink: {type:'url', target:'https://\u2026'}` (functions/src/notifications/broadcast.ts:55-58). The app model parses it correctly (app_notification.dart:55-62) but nothing consumes it \u2014 the whole card is a `GestureDetector` with `onTap` (notifications_screen.dart:196), so it looks tappable and does nothing. `url_launcher` is not used anywhere for this.",
+    "failure_scenario": "Marketing sends a broadcast \"Diwali sale \u2014 see the lookbook\" with a Custom URL deep link. Every app customer taps the notification card; the row just turns from unread to read and nothing opens. The campaign link is unreachable from the app.",
+    "fix": "Handle `case 'url'` by launching the target with `url_launcher` (`launchUrl(Uri.parse(target), mode: LaunchMode.externalApplication)`), guarding against malformed/non-http targets, or remove `url` from the admin's deep-link options."
+   },
+   {
+    "title": "markAllRead reads the whole unread set and commits one batch \u2014 >500 unread rows makes the badge impossible to clear",
+    "file": "app/lib/features/notifications/data/notifications_repository.dart",
+    "line": 40,
+    "severity": "medium",
+    "category": "crash-risk",
+    "detail": "`markAllRead` does an unbounded `.get()` of every `read == false` doc and puts one `batch.update` per doc into a single `WriteBatch` (lines 40-49). Firestore caps a batch at 500 writes, so with 501+ unread rows `batch.commit()` rejects with INVALID_ARGUMENT and *no* row is marked read (batches are atomic). The failure is invisible: it is invoked fire-and-forget from `dispose()` (notifications_screen.dart:36) and from the \"Mark all read\" tap (notifications_screen.dart:107) with no `catch`, so the Future error is unhandled and the user sees nothing. `all(uid)` (line 29) is likewise an unbounded read of the entire inbox with no `limit`, since inbox rows are never deleted (rules forbid client delete, firestore.rules:170).",
+    "failure_scenario": "A long-standing customer accumulates 600 unread broadcast/order notifications. They open the inbox and tap \"Mark all read\"; the commit is rejected, every row stays unread, and the home bell dot plus the profile unread pill are stuck at 9+ forever \u2014 repeating the action can never succeed.",
+    "fix": "Chunk the updates into batches of \u2264450 docs (and/or query with `.limit(450)` in a loop) and add a `.catchError` so failures are at least logged; add a `limit` to `all()` (e.g. newest 100 with paging)."
+   },
+   {
+    "title": "Edit profile never sets `profileComplete`, so a customer who skipped signup is sent back to Create Profile forever (including on the web)",
+    "file": "app/lib/features/profile/edit_profile_screen.dart",
+    "line": 77,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "`_save()` updates only `name`, `email` and `updatedAt`. It does not set `profileComplete: true` (nor recompute `searchIndex`), unlike both `AuthRepository.completeProfile` (auth_repository.dart:138-143) and the web's `completeCustomerProfile` (web/src/lib/customerDoc.ts). Every downstream router decision keys off `profileComplete`: app splash via `isProfileComplete()` (auth_repository.dart:100-110), the app OTP screen via `ensureCustomerDoc`, and the web via `needsProfile: !profileComplete` -> `router.replace('/create-profile')` (web/src/app/(auth)/signin/page.tsx:72).",
+    "failure_scenario": "User taps \"Skip\" at signup, then later fills in their full name and email on Profile -> Edit profile and saves. `profileComplete` stays false. On their next app login the OTP screen routes them to Create Profile again with empty fields, and signing in on the web immediately redirects them to /create-profile even though the account already has a name and email.",
+    "fix": "Have `_save()` write `profileComplete: true` and the recomputed `searchIndex` alongside name/email (both fields are permitted by the customers update rule at firebase/firestore.rules:135-136), or reuse `AuthRepository.completeProfile`."
+   },
+   {
+    "title": "Wishlist grid renders every saved product as \"Out of stock\" and its quick-add button is permanently inert",
+    "file": "app/lib/features/wishlist/data/wishlist.dart",
+    "line": 81,
+    "severity": "high",
+    "category": "dead-button",
+    "detail": "`WishlistItem.toProduct()` (wishlist.dart:81-95) rebuilds a `Product` from the denormalised wishlist snapshot but never passes `stock`, `hasVariants` or `variants`. `Product`'s constructor defaults them to `stock = 0`, `hasVariants = false`, `variants = const []` (app/lib/features/catalog/data/product.dart:50-53), and `Product.inStock` is `hasVariants ? variants.any(...) : stock > 0` (product.dart:85) \u2014 so every wishlist-derived Product is `inStock == false`. WishlistScreen feeds exactly this object to `ProductCard` (wishlist_screen.dart:83-88). ProductCard reacts to `!product.inStock` by painting the white dimming scrim + red \"Out of stock\" badge (product_card.dart:181-207) and `_AddButton` short-circuits to an inert `Icons.block_rounded` container with NO onTap (product_card.dart:281-292). The wishlist snapshot doc genuinely has no stock field (web writes the same shape, web/src/lib/wishlist.ts:38-55), so the data must be re-read from `products/{id}` \u2014 the web wishlist page sidesteps this by using its own WishlistCard that has no stock state at all.",
+    "failure_scenario": "Customer taps the heart on an in-stock perfume (stock 40), opens Profile \u25b8 Wishlist. The card is greyed out with an \"Out of stock\" badge and the green quick-add `+` is replaced by a dead block icon. Tapping it does nothing \u2014 the item can only be bought by opening the detail page. The same product on Home/Category shows in-stock and adds to bag fine.",
+    "fix": "Either persist `stock`/`hasVariants` in the wishlist snapshot payload (both app and web writers) and pass them through `toProduct()`, or have WishlistScreen resolve each id against the live `products` docs (e.g. `CatalogRepository.productsByIds`) before handing them to ProductCard."
+   },
+   {
+    "title": "\"Skip\" on Create Profile writes only a device-local pref; `customers.profileSkipped` is never written and the flag is never cleared on sign-out",
+    "file": "app/lib/features/auth/create_profile_screen.dart",
+    "line": 64,
+    "severity": "medium",
+    "category": "missing-state",
+    "detail": "`_skip()` calls `AppPrefs.setProfileSkipped()` (SharedPreferences, device-wide, not per-uid) and nothing else. The `profileSkipped` field that scripts/seed.ts:422 seeds and packages/shared/src/types/customers.ts:116 declares is written only as `false` by `_defaultCustomer` (auth_repository.dart:215) \u2014 no code anywhere ever sets it true, so it is a field nothing writes. AppPrefs also has no clear-on-sign-out: `AuthProvider.signOut()` (core/services/auth_provider.dart:64) just calls FirebaseAuth.signOut, and the log-out handler in profile_screen.dart:372 does no prefs cleanup.",
+    "failure_scenario": "Customer A signs in on a shared/handed-down phone and taps Skip (`profileSkipped=true` on the device). They log out; customer B signs in with a different number. Splash (splash_screen.dart:53-56) reads `complete=false, skipped=true` and sends B straight to Home with a blank profile \u2014 B is never asked for a name, and Profile shows \"Your account\". Meanwhile admin/web see `profileSkipped: false` for both, so they cannot distinguish a skipped profile from an abandoned one.",
+    "fix": "Persist `profileSkipped: true` on `customers/{uid}` in `_skip()` (the field is allowed by the update rule) and read it from the doc in splash; if the local pref is kept, key it by uid and clear it in the sign-out path."
+   },
+   {
+    "title": "CartProvider resets _inFlight to 0 while a write is in flight, underflowing the counter and permanently disabling snapshot suppression",
+    "file": "app/lib/core/services/cart_provider.dart",
+    "line": 227,
+    "severity": "medium",
+    "category": "missing-state",
+    "detail": "`_onAuthChanged` unconditionally does `_inFlight = 0;` (line 227) without waiting for outstanding `_flush` calls. Any `_flush` already past its `_inFlight++` (line 180) still runs its `finally { _inFlight--; }` (line 198), taking the counter to -1. `_busy` is defined as `_inFlight > 0 || (_debounce?.isActive ?? false)` (line 74), so from that point on a write in flight leaves `_inFlight` at 0 and `_busy` false. The whole optimistic-write design depends on `_busy` being true during a write to ignore the stale server echo (lines 238-241); with the counter offset by -1 that protection is silently off for the rest of the process's life, and `_maybeReconcile`'s `!_busy` guard (line 214) also misfires.",
+    "failure_scenario": "User taps '+' on a bag line (immediate `_flush`, `_inFlight == 1`), then signs out from Settings before the write returns. `_onAuthChanged` zeroes `_inFlight`; the in-flight flush settles afterwards and decrements it to -1. The user signs back in (or the write settles after the sign-in `_onAuthChanged`). Now every subsequent '+' tap runs with `_busy == false`, so the pre-write `customers/{uid}` snapshot is applied over the optimistic state: the quantity visibly jumps back to the old value for a moment on every tap, and a debounced multi-tap sequence can end up reconciled to a stale value.",
+    "fix": "Track outstanding writes with a generation/epoch token instead of resetting the counter \u2014 e.g. bump an `_epoch` in `_onAuthChanged` and have `_flush` skip its `_inFlight--`/reconcile work when its captured epoch is stale, or guard with `_inFlight = _inFlight < 0 ? 0 : _inFlight` and never reset it from outside `_flush`."
+   },
+   {
+    "title": "App shows a spinnable wheel for campaigns outside their startsAt/endsAt window, so 'Spin now' always fails",
+    "file": "app/lib/features/spin/data/spin_repository.dart",
+    "line": 21,
+    "severity": "medium",
+    "category": "dead-button",
+    "detail": "`activeCampaign()` filters only on `status == 'active'` (spin_repository.dart:21-26). `executeSpin` additionally rejects the spin when `now < startsAt || now > endsAt` with `failed-precondition` (functions/src/spin/execute.ts:57-59). Nothing ever flips a spin campaign's `status` \u2014 functions/src/scheduled/sweeps.ts contains only `couponExpirySweep`, and the `flashSaleStatusFlip` mentioned in functions/src/index.ts:71 is not implemented or exported. The admin explicitly models this state: admin/src/features/spinner/api/spinner.ts:73-75 derives the labels 'Scheduled' (startsAt in future) and 'Ended' (endsAt past) for campaigns whose stored `status` is still 'active', and `createCampaign` (spinner.ts:113-118) will happily write `status:'active'` with a future `startsAt` when 'Activate immediately' is ticked.",
+    "failure_scenario": "Admin creates a campaign starting next Monday with 'Activate immediately' ticked \u2192 `status:'active'`, `startsAt` = next Monday. Today a customer opens Spin & Win: the wheel renders, the copy says 'You have 3 free spins today', and 'Spin now' is enabled. Tapping it calls `executeSpin`, which throws `failed-precondition`, and the customer just gets an error toast \u2014 with no way to succeed. The same happens indefinitely after `endsAt` passes, because nothing ever moves the status off 'active'.",
+    "fix": "Filter the window client-side in `activeCampaign()` (drop campaigns whose `startsAt > now` or `endsAt < now`) so the screen falls through to the existing 'No spins available right now' state, and/or add a scheduled function that flips `spinCampaigns.status` to 'ended' past `endsAt`."
+   },
+   {
+    "title": "Content page detail ignores `published`, so unpublished/draft policy pages still render",
+    "file": "app/lib/features/settings/data/content_repository.dart",
+    "line": 27,
+    "severity": "medium",
+    "category": "cross-surface-mismatch",
+    "detail": "`watchPage(id)` maps on `d.exists` only and never checks `published` (lines 27-30), while the list query filters `where('published', isEqualTo: true)` (line 17). ContentPageScreen consequently renders any `content/{id}` doc it is handed, and its own \"Not available / This page is no longer published\" empty state (content_page_screen.dart:80-84) is unreachable \u2014 it only fires when the doc is deleted, and admin content pages are created-then-edited, never deleted (admin/src/features/settings/api/content.ts writes `published: false` for drafts, line 134-149). Firestore rules allow any authenticated client to read every `content` doc (firestore.rules:49), so drafts are fetchable. The web deliberately resolves pages only from the published list (`useContentPageBySlug` \u2192 `useContentPages`, web/src/lib/siteSettings.ts:91-95) and shows \"It may have been unpublished\".",
+    "failure_scenario": "Admin unpublishes the Refund Policy while drafting a new version. A customer with the page open (live stream) keeps reading the withdrawn text, and anyone navigating to /content/{id} \u2014 a route reachable from a stale back-stack entry \u2014 renders the unpublished draft as if it were live policy.",
+    "fix": "Filter in `watchPage`: `.map((d) => d.exists && (d.data()?['published'] == true) ? ContentPage.fromDoc(d) : null)` so the existing \"no longer published\" empty state does its job."
+   }
+  ]
+ },
+ "admin-analytics": {
+  "count": 8,
+  "files": [
+   "admin/src/features/dashboard/api/dashboard.ts",
+   "admin/src/features/reports/api/reports.ts"
+  ],
+  "findings": [
+   {
+    "title": "Top-products report reads itemsSummary, which checkout truncates to the first 4 line items",
+    "file": "admin/src/features/reports/api/reports.ts",
+    "line": 228,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "computeTopProducts iterates `o.itemsSummary ?? []`. The only writer of orders, functions/src/orders/checkout.ts:492, writes `itemsSummary: priced.slice(0, 4).map(...)` \u2014 it is an explicitly capped thumbnail strip, not the line-item list. The full line items are written on the same doc as `items` (checkout.ts:474-482, typed `Order.items` in packages/shared/src/types/orders.ts:47) and older orders keep them in the orders/{id}/items subcollection. The reports module never reads either. admin/src/features/orders/api/orders.ts:35 already implements the correct embedded-array + subcollection fallback; reports does not use it.",
+    "failure_scenario": "A customer checks out with 6 distinct products (A..F). checkout writes itemsSummary=[A,B,C,D] and items=[A..F]. On Reports, products E and F contribute \u20b90 revenue and never appear in Top products, no matter how expensive they are. Every order with >4 distinct products silently under-reports.",
+    "fix": "Iterate the canonical line items instead: `const lines = o.items ?? []` (plus the legacy orders/{id}/items fallback used by useOrderItems), and accumulate per productId from those. Never use itemsSummary for analytics."
+   },
+   {
+    "title": "Top-products revenue is priced from the live catalog price, not the order's line totals",
+    "file": "admin/src/features/reports/api/reports.ts",
+    "line": 229,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "`const priceOf = new Map(products.map(p => [p.id, p.offerPricePaise ?? 0]))` (line 223) and `revenue = (item.quantity ?? 0) * (priceOf.get(item.productId) ?? 0)` (line 229). The order line already carries the realised amount: OrderItem.lineTotalPaise / offerPricePaise, written at checkout (checkout.ts:479). Worse, for a variant product the product-level offerPricePaise is just the FIRST variant row's price \u2014 admin/src/features/products/routes/ProductFormPage.tsx:205,235 sets `baseRow = variantRows[0]` and writes `offerPricePaise: toPaise(offerOf(baseRow))`. Coupon/spin discounts on the order are also ignored.",
+    "failure_scenario": "An abaya sold in S/M/L at \u20b91,200/\u20b91,400/\u20b91,600 (S is variant row 0). 100 units of L sold last month \u2192 Top products reports 100 \u00d7 \u20b91,200 = \u20b91,20,000 instead of \u20b91,60,000. If an admin then edits the price to \u20b9999, the report for the ALREADY-CLOSED period retroactively drops to \u20b999,900 \u2014 historical revenue changes when a price is edited. A product deleted from the catalog reports \u20b90.",
+    "fix": "Compute revenue from the order line itself: `row.paise += item.lineTotalPaise ?? (item.quantity * item.offerPricePaise)`, using o.items (with the legacy subcollection fallback). Drop the products\u2192price map entirely; the products query is then only needed for names."
+   },
+   {
+    "title": "Reports opens four unbounded real-time listeners over entire collections with no limit or date filter",
+    "file": "admin/src/features/reports/api/reports.ts",
+    "line": 46,
+    "severity": "high",
+    "category": "perf",
+    "detail": "useReportOrders subscribes to `query(collection(db,'orders'), orderBy('createdAt','desc'))` \u2014 the whole orders collection, live, no limit; useReportProducts (line 52) reads all products; useReportCustomers (line 57) all customers; useReportOrderRequests (line 64) all orderRequests. Every order document now embeds its full `items` array (checkout.ts:495), so each doc is large. All KPI/trend/top-product maths is then done client-side in render (ReportsPage.tsx:70-72) over the full arrays on every keystroke-free re-render. The snapshots are held forever in the module-level `cache` map in hooks/firestoreCache.ts:32 \u2014 the listener detaches on unmount but the data is never evicted.",
+    "failure_scenario": "At 50,000 lifetime orders, opening Reports downloads 50,000 documents (tens of MB, 50k billed reads) before the first KPI appears, and the tab keeps that array resident for the session. Selecting the 7D preset still reads all 50,000 docs to compute a 7-day number, and every new order pushed by the listener re-runs computeKpis/computeTrend/computeTopProducts over the whole set.",
+    "fix": "Scope the queries to the active range (`where('createdAt','>=', rangeStart(range))`) so the read grows with the window, not the store's lifetime; use getDocs rather than onSnapshot for a report; and memoise the compute functions with useMemo on [data, range]."
+   },
+   {
+    "title": "Reports CSV export writes rounded display strings instead of numeric amounts",
+    "file": "admin/src/features/reports/api/reports.ts",
+    "line": 259,
+    "severity": "medium",
+    "category": "broken-crud",
+    "detail": "downloadReportCsv emits `formatMoneyCompact(kpis.totalRevenuePaise)` (line 259), `formatMoneyInt(b.paise)` for every trend row (line 265) and `formatMoneyCompact(r.revenuePaise)` per product (line 268). packages/shared/src/money.ts formatMoneyCompact returns `\u20b9X.XL` / `\u20b9X.XX Cr` \u2014 1\u20132 significant decimals \u2014 and formatMoneyInt returns Indian-grouped digits with commas, which the escaper at line 252 then wraps in quotes. The CSV therefore contains currency-symbol text, not numbers.",
+    "failure_scenario": "Total revenue of 123456700 paise (\u20b912,34,567) exports as the cell `\u20b912.3L`, losing \u20b94,567. A month bar of \u20b91,23,456 exports as `\"\u20b91,23,456\"`. Opening the file in Excel/Sheets gives text columns that cannot be summed, charted or reconciled against the ledger \u2014 the export is unusable for its only purpose.",
+    "fix": "Export raw values (paise, or rupees as `paise/100` with 2dp) in dedicated numeric columns \u2014 e.g. `Total revenue,${kpis.totalRevenuePaise / 100}` \u2014 and keep formatted strings out of the file, or add them as a separate human-readable column alongside the numeric one."
+   },
+   {
+    "title": "Dashboard revenue trend caps at 2000 oldest orders, zeroing out the most recent months",
+    "file": "admin/src/features/dashboard/api/dashboard.ts",
+    "line": 248,
+    "severity": "high",
+    "category": "perf",
+    "detail": "`query(ordersCol(), where('createdAt','>=',from), orderBy('createdAt','asc'), limit(2000))`. The sort is ASCENDING, so the limit keeps the OLDEST 2000 documents in the window and discards everything after them. The result is then bucketed into the 12 monthly / 30 daily bars. There is no indication to the user that the series is truncated.",
+    "failure_scenario": "Store does 300 orders/month. On the 12M range the query window holds ~3600 orders; the ascending limit(2000) returns only the first ~6.7 months. The bars for the last ~5 months \u2014 including the current month \u2014 render at heightPct 2 with \u20b90, so the dashboard shows revenue having collapsed to zero. Growth makes the problem worse, not better.",
+    "fix": "Either aggregate server-side per bucket (getAggregateFromServer with sum('totalPaise') per month/day range, same pattern already used by sumTotalPaise at line 43), or page through the window with startAfter until exhausted. If a cap must stay, order DESCENDING so the newest data survives and label the chart as partial."
+   },
+   {
+    "title": "Dashboard counts cancelled orders as revenue; Reports excludes them \u2014 the two screens disagree",
+    "file": "admin/src/features/dashboard/api/dashboard.ts",
+    "line": 110,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "dashboard.ts sums totalPaise with no status filter: today's revenue (line 85), yesterday (86), lifetime for AOV (87), the 30/60-day AOV windows (90-93) and the trend bars (line 255) all include status=='cancelled' orders. reports.ts:100-101 does the opposite \u2014 `sumRevenue` filters `o.status !== 'cancelled'` and computeTrend skips them (reports.ts:194) \u2014 with the comment \"Cancelled orders never realised revenue\". Same collection, same field, two different answers in the same admin panel.",
+    "failure_scenario": "On a day with \u20b91,00,000 booked and \u20b940,000 cancelled, Dashboard \"Today's revenue\" shows \u20b91.0L while Reports (7D) attributes \u20b960,000 to that day. \"Avg order value\" on the dashboard is inflated further because the cancelled orders are in both the numerator (lifetime sum) and the denominator (countOrders([]) with no status filter).",
+    "fix": "Apply the reports rule to the dashboard: add `where('status','!=','cancelled')` (or subtract a cancelled-only aggregate) to every sumTotalPaise/countOrders call and to the trend reducer, so both surfaces use one definition of realised revenue."
+   },
+   {
+    "title": "Dashboard KPI aggregate fallback silently caps at 500/1000 docs, producing wrong lifetime revenue and AOV",
+    "file": "admin/src/features/dashboard/api/dashboard.ts",
+    "line": 49,
+    "severity": "medium",
+    "category": "missing-state",
+    "detail": "sumTotalPaise catches ANY error from getAggregateFromServer and falls back to `getDocs(query(..., limit(500)))` (line 49); countOrders falls back to `limit(1000)` (line 59). The catch is unqualified, so a transient failure, an unsupported aggregate path, or the emulator case named in the comment all silently return a partial number with no error surfaced. The two fallbacks use different caps, so the AOV numerator and denominator are truncated inconsistently at line 110 (`lifetimeRevenue / totalOrders`). Note the fallback for the lifetime sum has no orderBy, so the 500 documents it picks are arbitrary.",
+    "failure_scenario": "Store has 3,000 orders averaging \u20b92,000. Aggregates fail once \u2192 lifetimeRevenue = sum of an arbitrary 500 orders (~\u20b910,00,000), totalOrders = 1,000 (capped). Avg order value renders \u20b91,000 \u2014 half the true value \u2014 and \"Total orders\" reads 1,000 instead of 3,000, with no error indicator anywhere on the page.",
+    "fix": "Only fall back for the specific unimplemented-aggregate error; otherwise rethrow so react-query surfaces isError. If a fallback runs, page through with startAfter until exhausted rather than truncating, or mark the KPI as approximate in the returned object so the card can say so."
+   },
+   {
+    "title": "Category performance panel is hardcoded to four seed category ids and ignores the categories collection",
+    "file": "admin/src/features/dashboard/api/dashboard.ts",
+    "line": 162,
+    "severity": "medium",
+    "category": "incomplete",
+    "detail": "CATEGORY_META hardcodes exactly `perfumes | clothing | books | islamic`, and categoryPerformance returns `Object.entries(CATEGORY_META).map(...)` (line 176) \u2014 it iterates the hardcoded map, not the totals actually accumulated from `p.categoryId` (line 173). Category ids are admin-authored slugs: saveCategory writes `setDoc(doc(db,'categories', slug), { id: slug, ... })` with `slug = slugify(values.name)` (admin/src/features/categories/api/categories.ts:71,89). The four literals only match because scripts/seed.ts:269-272 seeds those ids. The panel also uses lifetime `soldCount` (units, not revenue) and ignores the 12M/30D/7D range selector sitting next to it.",
+    "failure_scenario": "Admin creates \"Dates & Gifts\" (id `dates-gifts`) and it becomes the best seller, then deletes the seeded `books` category. Dashboard still lists Perfumes/Clothing/Books/Islamic; Books shows 0% for a category that no longer exists, and the top-selling real category is never displayed at all. On any store not built from the seed, all four bars read 0%.",
+    "fix": "Drive the panel from the live `categories` collection (useCategories, CATEGORIES_KEY) joined to the per-categoryId totals, taking label/tint from the category doc, and aggregate order line revenue over the selected range instead of lifetime soldCount."
+   }
+  ]
+ },
+ "admin-catalog": {
+  "count": 9,
+  "files": [
+   "admin/src/features/categories/api/categories.ts",
+   "admin/src/features/categories/routes/CategoryFormPage.tsx",
+   "admin/src/features/coupons/api/coupons.ts",
+   "admin/src/features/inventory/api/inventory.ts",
+   "admin/src/features/inventory/routes/AdjustStockPage.tsx",
+   "admin/src/features/products/api/products.ts",
+   "admin/src/features/products/routes/ProductFormPage.tsx"
+  ],
+  "findings": [
+   {
+    "title": "publishedAt is never stamped when a product goes draft \u2192 published, so \"New arrivals\" is broken for the create-draft-then-publish workflow",
+    "file": "admin/src/features/products/api/products.ts",
+    "line": 165,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "Both storefronts derive New Arrivals from publishedAt: web/src/lib/catalog.ts:43-56 (`liveAtMillis` = publishedAt ?? createdAt, window = 3 days) and app/lib/features/catalog/data/product.dart:120-124 (same fallback). The only writes to publishedAt in the whole repo are products.ts:160 (`serverTimestamp()` at create, regardless of the chosen status), products.ts:209 (duplicate \u2192 null) and products.ts:294 (CSV import \u2192 null). `grep -rn publishedAt admin/src functions/src` shows no other writer. The edit path (`updateDoc(doc(db,'products',values.id), base)` at line 165) writes `base`, which contains `status` but no `publishedAt`, and `setProductArchived` (line 52) flips status to 'published' without touching it either. So flipping status from draft to published never moves publishedAt.",
+    "failure_scenario": "Admin creates a product on 1 Jul with Status = Draft (publishedAt = 1 Jul). Photos and copy are finished on 20 Jul and the admin sets Status = Published and saves. publishedAt stays 1 Jul, so `isNewArrival` is false immediately and the product never appears in the web home \"New arrivals\" rail or the app's newArrivals list. Same for CSV-imported products (publishedAt null \u2192 falls back to the import-day createdAt).",
+    "fix": "In `saveProduct`, when `!isNew` and the status is transitioning to 'published' while the stored doc's publishedAt is null or the stored status was not 'published', include `publishedAt: serverTimestamp()` in the update (the form already holds `existingRef.current`). Do the same in `setProductArchived` when restoring to 'published'."
+   },
+   {
+    "title": "Saving a product writes back the rating aggregate captured when the form opened, silently reverting review approvals",
+    "file": "admin/src/features/products/routes/ProductFormPage.tsx",
+    "line": 222,
+    "severity": "medium",
+    "category": "broken-crud",
+    "detail": "`rating`/`ratingCount` are initialised once from the seed/loaded doc (lines 96-97, 126-127) and unconditionally written on every save (lines 222-223 \u2192 products.ts:130-131, included in `base` for the `updateDoc` path). But those same two fields are a derived aggregate maintained transactionally by review moderation: admin/src/features/reviews/api/reviews.ts:59-64 recomputes `ratingCount` and `rating` inside `runTransaction` on approve/reject. The product form's blind overwrite is not part of that transaction and has no read-back, so it is a classic lost update.",
+    "failure_scenario": "Product has 12 approved reviews (rating 4.3, ratingCount 12). Admin A opens the product edit form. Admin B approves a 5-star review \u2192 the transaction writes rating 4.36\u21924.4, ratingCount 13. Admin A fixes a typo in the description and clicks Save \u2192 rating 4.3 / ratingCount 12 are written back, dropping the new review from the aggregate. If B later rejects that review, `moderateReview` subtracts it a second time, leaving rating/ratingCount permanently below the true value.",
+    "fix": "Drop `rating`/`ratingCount` from `ProductFormValues` and from `base` in `saveProduct` on the edit path (leave them only in the `isNew` seed block), or make the fields write-only-when-dirty and perform the write inside a transaction that re-reads the current aggregate."
+   },
+   {
+    "title": "bestSellerOrder is re-stamped with Date.now() on every save, reshuffling the storefront Best-sellers rail on unrelated edits",
+    "file": "admin/src/features/products/api/products.ts",
+    "line": 132,
+    "severity": "medium",
+    "category": "cross-surface-mismatch",
+    "detail": "`bestSellerOrder: values.isBestSeller ? Date.now() : null` sits in `base`, which is written on BOTH the create and the edit path (lines 138 and 165). The comment three lines above says \"Order stamped when first flagged\", but the code re-stamps unconditionally. web/src/app/(shop)/page.tsx:28-29 renders the rail as `products.filter(p => p.isBestSeller).sort((a,b) => (a.bestSellerOrder ?? 1e9) - (b.bestSellerOrder ?? 1e9))` \u2014 ascending, i.e. earliest-stamped first \u2014 and firestore.indexes.json carries a dedicated `status + isBestSeller + bestSellerOrder ASC` index for it.",
+    "failure_scenario": "Five best sellers are curated in a deliberate order. The merchandiser opens the first one (bestSellerOrder = 1 Jun) to fix a spelling mistake in its description and saves. Its bestSellerOrder becomes today's epoch \u2014 the largest value \u2014 so on the next home-page load it jumps from position 1 to position 5. Any routine edit silently reorders the rail, and there is no UI to restore the intended order.",
+    "fix": "Only stamp when the flag transitions off\u2192on: `bestSellerOrder: values.isBestSeller ? (existing?.bestSellerOrder ?? Date.now()) : null`, passing the loaded product's current value through `ProductFormValues` (the form already keeps it in `existingRef.current`)."
+   },
+   {
+    "title": "publishedAt is stamped at product creation even for drafts, so a product drafted more than 3 days before going live never enters New Arrivals",
+    "file": "admin/src/features/products/api/products.ts",
+    "line": 160,
+    "severity": "medium",
+    "category": "missing-state",
+    "detail": "On create, saveProduct writes `publishedAt: serverTimestamp()` unconditionally (line 160) regardless of `values.status` ('draft' or 'published'). On update the `base` payload (lines 100-134) contains `status` but never `publishedAt`, so publishing a draft never refreshes it. Both storefronts derive New Arrivals purely from that timestamp: web/src/lib/catalog.ts:44-63 (`publishedAt ?? createdAt`, 3-day window) and app/lib/features/catalog/data/catalog_repository.dart:190-194 (`publishedAtMillis >= now - 3d`). The comment at products.ts:120-122 states new arrivals is automatic with no admin flag, so there is no manual override.",
+    "failure_scenario": "Buyer creates 20 Eid products as drafts on 1 July (each gets publishedAt = 1 July), finishes photography and flips them all to Published on 10 July. On both web and app the New Arrivals rail stays empty \u2014 the products are already 9 days past their recorded publish date and aged out before they were ever visible. There is no admin control to fix it short of deleting and recreating each product.",
+    "fix": "Write `publishedAt: values.status === 'published' ? serverTimestamp() : null` on create, and in the update path set `publishedAt: serverTimestamp()` when the status transitions from a non-published state to 'published' (leave it untouched otherwise)."
+   },
+   {
+    "title": "Removing a sub-category chip in the category form skips the in-use guard that the sub-categories screen enforces, stranding products",
+    "file": "admin/src/features/categories/routes/CategoryFormPage.tsx",
+    "line": 266,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "SubCategoriesPage.tsx:60-67 guards deletion: `askDelete` calls `countSubCategoryProducts(category.id, s.id)` and refuses when any product is attached (\"Deleting a sub-category strands its products outside every storefront query\"). CategoryFormPage performs the exact same mutation on the same embedded `subCategories` array \u2014 line 266 `setSubs((arr) => arr.filter((x) => x.id !== s.id))` \u2014 with no count check at all, and `onSave` (line 139) writes the whole array through `saveCategory` \u2192 `updateDoc`. Products keep their `subCategoryId`/`subCategorySlug`, but the sub no longer exists on the category doc.",
+    "failure_scenario": "Category \"perfumes\" has sub \"attar\" with 12 published products. Admin opens Edit category to change the tint, clicks the \u00d7 on the \"attar\" chip (a stale chip they think is a typo), and saves. The 12 products are untouched but 'attar' is gone from `categories/perfumes.subCategories`, so: web ListingView's sub-category facet (ListingView.tsx:58-80) no longer lists it, the admin Product form's Sub-category dropdown (ProductFormPage.tsx:333) can no longer select it \u2014 so re-saving any of those 12 products fails required-field validation \u2014 and the app's `productsInCategory(subCategorySlug: 'attar')` path is unreachable from the UI.",
+    "fix": "Make the chip's \u00d7 call the same `countSubCategoryProducts(id, s.id)` guard used in SubCategoriesPage.askDelete (await it, toast and abort when > 0), or drop sub-category editing from the category form entirely and route it to the guarded screen."
+   },
+   {
+    "title": "Changing a category tint fans out writes to products, which a categories-only sub-admin is denied",
+    "file": "admin/src/features/categories/api/categories.ts",
+    "line": 119,
+    "severity": "medium",
+    "category": "broken-crud",
+    "detail": "`fanOutCategoryTint` (called from CategoryFormPage.tsx:141 whenever an existing category's tint changes) reads every product in the category and commits `batch.update(d.ref, { categoryTint: tint })` against the `products` collection. firebase/firestore.rules:51 gates products writes on `canWrite('products')`, but this action lives entirely inside the Categories module. Additionally the batching loop commits in chunks of 400 sequentially, so a partial failure leaves some products with the new tint and the rest with the old one.",
+    "failure_scenario": "Sub-admin granted `categories: edit` but not `products: edit` opens a category, changes its tint and saves. `saveCategory` succeeds (categories rule passes) but the first `batch.commit()` is rejected with permission-denied, so the category doc says one tint while every product card still renders the old `categoryTint`, and the surfaced error makes it look like the whole save failed.",
+    "fix": "Move the fan-out into a Cloud Function guarded by `requireModule(req,'categories','edit')` (it is a cross-document denormalisation, which is exactly the CF criterion), or have readers derive `categoryTint` from the category doc instead of denormalising it onto every product."
+   },
+   {
+    "title": "Save handler throws an uncaught TypeError (dead Save button) when a bumped SKU disappears from the live product snapshot",
+    "file": "admin/src/features/inventory/routes/AdjustStockPage.tsx",
+    "line": 62,
+    "severity": "high",
+    "category": "crash-risk",
+    "detail": "`deltas` is keyed by `SkuRow.key` (`${p.id}` or `${p.id}_${v.id}`, api/inventory.ts:183/198) and is never reconciled against `rows`, which is recomputed from the live `useInventoryProducts()` subscription on every snapshot. Line 62 does `const r = rowByKey.get(key)!;` with a non-null assertion, and the whole `payload` build (lines 58-64) sits OUTSIDE the `try` block that starts on line 65. If a key in `deltas` no longer has a row, `r` is `undefined` and `r.productId` throws. Nothing catches it: the `catch` on line 75 is never reached, no toast fires, `setSaving` was never called, and `changedCount` (line 46) still counts the stale key so the button keeps showing e.g. \"Save adjustments (1)\".",
+    "failure_scenario": "Admin A opens /inventory/adjust and clicks + on variant SKU `p9_v2`. Admin B (or the same admin in another tab) deletes product p9, or edits p9 to drop variant v2, or flips a simple product to hasVariants (which changes its key from `p9` to `p9_v1`). The live listener pushes the new snapshot, the row vanishes from the table, but `deltas['p9_v2']` remains. Admin A clicks Save -> TypeError: Cannot read properties of undefined (reading 'productId'). No error toast, no navigation, no adjustment saved, and every subsequent click on Save does the same nothing.",
+    "fix": "Build the payload inside the try block and skip/report unknown keys: `const r = rowByKey.get(key); if (!r) return null;` then filter nulls (and prune `deltas` of keys missing from `rows` in an effect, warning the admin that a SKU changed)."
+   },
+   {
+    "title": "Stock is committed by the callable before the ledger batch, so a ledger failure reports total failure and the retry double-applies the stock delta",
+    "file": "admin/src/features/inventory/api/inventory.ts",
+    "line": 115,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "`adjustStock` first awaits the `adminAdjustStock` callable (line 84), which transactionally commits the stock change, and only then builds and commits the client-side `stockAdjustments` batch (line 115). There is no compensation. Any rejection after line 88 - `batch.commit()` failing on a network blip/offline/rules denial, or the callable itself rejecting *after* the transaction because `writeAudit` on functions/src/catalog/inventory.ts:90 throws - propagates to AdjustStockPage.tsx:75, which shows the generic `toast.error('Could not save adjustments.')`, keeps the page mounted and keeps `deltas` fully populated. The callable is a relative `+delta` mutation with no idempotency key, so pressing Save again applies the delta a second time.",
+    "failure_scenario": "Admin sets +50 on SKU BRK-77 (stock 10) and clicks Save. The transaction commits stock 10 -> 60, then `batch.commit()` rejects (Wi-Fi drops for two seconds, or writeAudit throws). Toast says \"Could not save adjustments.\" The +50 stepper is still on screen, so the admin clicks Save again. Stock is now 110, and only one ledger row (before 60, after 110) exists. Real stock is inflated by 50 with no record of why.",
+    "fix": "Either move the stockAdjustments ledger writes into the same Cloud Function transaction (the CF already computes before/after), or send a client-generated idempotency key with the callable so a retry is a no-op; at minimum clear `deltas` / block the retry and surface \"stock was adjusted but history could not be written\" instead of a blanket failure."
+   },
+   {
+    "title": "Coupon 'Category restriction' is written to Firestore but no surface enforces it, so a category-limited coupon discounts any cart",
+    "file": "admin/src/features/coupons/api/coupons.ts",
+    "line": 130,
+    "severity": "high",
+    "category": "dead-button",
+    "detail": "CouponFormPage.tsx:328-349 renders category chips and saveCoupon persists `applicableCategories: values.applicableCategories` (coupons.ts:130) as category slugs. Grepping every consumer of that field across the repo returns exactly one hit \u2014 app/lib/features/checkout/data/offers.dart:108, which uses it only to build a display string ('Perfume only'). `computeCouponDiscount` and `autoBestOffer` in functions/src/orders/checkout.ts never read it, and web/src/components/checkout/offers.ts never reads it. Also note the admin stores `c.slug` while products carry `categoryId`/`categorySlug`, so even a future check would need the slug form.",
+    "failure_scenario": "Admin creates PERFUME20 (20% off) and restricts it to the 'perfume' category to clear that stock. A customer puts only \u20b95,000 of dates and dry fruits (categoryId 'grocery') in the cart and enters PERFUME20. computeCouponDiscount validates code, active, min cart, uses, and applies \u20b91,000 off with no category check. The margin-protecting restriction the admin configured is a no-op.",
+    "fix": "Enforce it server-side in computeCouponDiscount/autoBestOffer: `priceLines` already resolves each product, so reject (or restrict the discount base to) lines whose `categorySlug`/`categoryId` is not in `applicableCategories` when that array is non-empty. Mirror the check in web offers.ts."
+   }
+  ]
+ },
+ "admin-rest": {
+  "count": 11,
+  "files": [
+   "admin/src/features/affiliate/routes/AllocateAffiliatePage.tsx",
+   "admin/src/features/notifications/api/notifications.ts",
+   "admin/src/features/payments/api/payments.ts",
+   "admin/src/features/reviews/api/reviews.ts",
+   "admin/src/features/settings/api/variables.ts",
+   "admin/src/features/settings/routes/StorefrontTab.tsx",
+   "admin/src/features/spinner/api/spinner.ts",
+   "admin/src/features/subadmin/routes/SubAdminListPage.tsx"
+  ],
+  "findings": [
+   {
+    "title": "Variant delete-safety downloads the entire products collection once per unit, so deleting a group with N units triggers N full-collection reads",
+    "file": "admin/src/features/settings/api/variables.ts",
+    "line": 67,
+    "severity": "medium",
+    "category": "perf",
+    "detail": "`countProductsUsingUnit` does `getDocs(collection(db, 'products'))` \u2014 an unbounded, unfiltered read of every product document \u2014 and then scans `variants[].attributes` client-side. VariablesTab.tsx:119-126 calls it in a serial `for (const u of delTarget.units)` loop before deleting a variant, and AddUnitsModal.tsx:77 calls it again on every individual chip removal. There is no caching, no `limit`, and no reuse of the already-live products listener (`useProductsList` / PRODUCTS_KEY) that the admin app maintains elsewhere.",
+    "failure_scenario": "With a 2,000-product catalogue, an admin deletes the \"Size\" group which holds 8 units (XS\u2026XXL). VariablesTab.confirmDelete awaits 8 sequential full-collection downloads = 16,000 document reads and tens of seconds of blocked UI before the delete happens (and it aborts on the first in-use unit, after already paying for the earlier scans). Removing 3 colour chips one at a time costs another 6,000 reads.",
+    "fix": "Fetch the products once (or read from the already-subscribed PRODUCTS_KEY cache via `getCachedList<Product>`), build a Set of all attribute values in use, and answer every unit check from that one pass; pass the whole unit-id list to a single `countUnitsInUse(ids)` helper for the group-delete case."
+   },
+   {
+    "title": "`settings/returns.autoRefundToWallet` is a dead toggle \u2014 no code ever reads it",
+    "file": "admin/src/features/settings/routes/StorefrontTab.tsx",
+    "line": 329,
+    "severity": "medium",
+    "category": "dead-button",
+    "detail": "The Storefront settings tab renders a Toggle bound to `autoRefundToWallet` and persists it via `saveReturns({ id:'returns', windowDays: days, autoRefundToWallet })` (StorefrontTab.tsx:296). Grepping the entire repo for `autoRefundToWallet` yields only: the shared type (packages/shared/src/types/settings.ts:84), this component, and the two seed scripts. `functions/src/returns/decisions.ts` never reads `settings/returns`; it always branches on `const toWallet = (r.refundMethod ?? 'wallet') === 'wallet'` (decisions.ts:77), and `requestReturnOrReplacement` hardcodes `refundMethod: 'wallet'` on every request (requests.ts, orderRequests payload). So `toWallet` is always true.",
+    "failure_scenario": "An admin turns 'Auto-refund to wallet' OFF and saves (toast confirms success). They then approve a return: `adminApproveOrderRequest` still credits `customers/{uid}.wallet.balancePaise` and writes a `walletTransactions` credit exactly as before. The setting has zero effect and there is no other refund path in the codebase.",
+    "fix": "Either have `adminApproveOrderRequest` read `settings/returns.autoRefundToWallet` and, when false, leave the request at an 'approved, awaiting manual payout' state without crediting the wallet, or remove the toggle."
+   },
+   {
+    "title": "'Auto-refund to wallet' toggle in Settings writes a field no code ever reads",
+    "file": "admin/src/features/settings/routes/StorefrontTab.tsx",
+    "line": 296,
+    "severity": "medium",
+    "category": "dead-button",
+    "detail": "`saveReturns({ id: 'returns', windowDays: days, autoRefundToWallet })` persists `settings/returns.autoRefundToWallet`. Grepping every surface (functions/src, web/src, app/lib) for `autoRefund` returns only this writer, the type declaration (packages/shared/src/types/settings.ts:84) and the seeds. functions/src/returns/decisions.ts \u2014 the approval path \u2014 never loads `settings/returns`; it unconditionally takes `const toWallet = (r.refundMethod ?? 'wallet') === 'wallet'` (line 77) and `refundMethod` is itself hardcoded to `'wallet'` when the request is created (functions/src/returns/requests.ts:113). So the toggle can only ever be 'on' in effect.",
+    "failure_scenario": "An admin turns 'Auto-refund to wallet' off, expecting approved returns to stop crediting the wallet and to be settled manually. They see 'Return settings saved'. The next approved return still credits the customer's wallet and writes a walletTransactions ledger entry (decisions.ts:84-98), because no code path consults the flag.",
+    "fix": "Either read `settings/returns.autoRefundToWallet` in adminApproveOrderRequest and branch the refund method on it, or remove the toggle from the Storefront tab until the server honours it."
+   },
+   {
+    "title": "The `payments` collection has no writer \u2014 the admin Payments page and GST-invoice export are permanently empty in production",
+    "file": "admin/src/features/payments/api/payments.ts",
+    "line": 10,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "`usePaymentsList()` subscribes to `collection(db,'payments')`. A full grep of `functions/src` for `payments` returns exactly one hit \u2014 `requireModule(req,'payments','view')` in `orders/invoice.ts:19` \u2014 i.e. no Cloud Function ever creates or updates a `payments/{id}` document. `placeOrder` (functions/src/orders/checkout.ts:504-509) and `verifyRazorpayPayment` (checkout.ts:726-729) only stamp `paymentStatus`/`amountPaidPaise`/`razorpayPaymentId` on the ORDER doc. `firestore.rules:76-79` makes `payments` `allow write: if false`, so no client can write it either. The only writer in the whole repo is `scripts/seed.ts:684` (`db.doc('payments/'+orderId).set(...)`). Consequently the `partial_refund`/`refunded` branches in `paymentStatusPill` (payments.ts:23-26) are dead \u2014 `adminApproveOrderRequest` increments `orders.refundedPaise` and flips `orders.paymentStatus`, never the payment doc.",
+    "failure_scenario": "On a real (non-seeded) project: a customer completes a Razorpay checkout, `verifyRazorpayPayment` sets order.paymentStatus='captured'. An admin opens /payments -> the table renders 'No payments yet.' and the header reads '\u20b90 this month \u00b7 0 failed'. Clicking 'GST invoices' toasts 'Nothing to export.' Every captured payment in the business is invisible to the admin.",
+    "fix": "Write a `payments/{orderId}` doc from `placeOrder` (status 'pending'/'captured' for fully-wallet orders) and update it in `verifyRazorpayPayment` (status 'captured', gatewayRef=razorpayPaymentId); update it to 'refunded'/'partial_refund' inside the `adminApproveOrderRequest` transaction alongside the `orders.refundedPaise` increment."
+   },
+   {
+    "title": "The `payments` collection is never written by any Cloud Function \u2014 the admin Payments module only ever shows seeded rows",
+    "file": "admin/src/features/payments/api/payments.ts",
+    "line": 9,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "`usePaymentsList()` subscribes to `collection(db,'payments')` and PaymentsListPage renders/exports from it (including the 'GST invoices' CSV of captured payments, PaymentsListPage.tsx:56). Nothing writes that collection: grepping functions/src for `payments` yields only `requireModule(req,'payments','view')` in orders/invoice.ts. `placeOrder` (functions/src/orders/checkout.ts:546) writes only the order doc, `verifyPayment` (line 725) only patches the order, and `topUpWallet`/`verifyTopUp` only write walletTransactions. The single writer in the repo is scripts/seed.ts:684. The shared `Payment` type and the read rule `match /payments/{id} \u2026 isOwner(resource.data.customerId)` (firebase/firestore.rules:76) exist for documents nothing creates.",
+    "failure_scenario": "On a fresh (unseeded) project, a customer places and pays for 50 razorpay orders. The admin opens Payments: the list is empty, month-to-date total is \u20b90 and 'failed' is 0, and 'Export GST invoices' reports 'Nothing to export' \u2014 while Orders shows all 50 as Paid.",
+    "fix": "Write a `payments/{id}` doc inside the placeOrder transaction and update it in verifyPayment (id/orderId/customerId/method/gateway/status/amountPaise/gatewayRef/createdAt), or drop the Payments module and derive it from `orders`."
+   },
+   {
+    "title": "Review moderation writes products/{id}, which is gated by the products module, so a reviews-only sub-admin cannot approve anything",
+    "file": "admin/src/features/reviews/api/reviews.ts",
+    "line": 64,
+    "severity": "high",
+    "category": "broken-crud",
+    "detail": "`moderateReview` runs one transaction that updates BOTH the review (line 50, `tx.update(rRef, {status, moderatedBy, moderatedAt, updatedAt})`) and the product aggregate (line 64, `tx.update(pRef, { ratingCount: newCount, rating: newRating })`). firebase/firestore.rules:51 gates `products` writes on `canWrite('products')` \u2014 i.e. products.create|edit|delete \u2014 while `reviews` moderation is a separate module (`reviews` is its own MODULE_KEY, packages/shared/src/enums.ts:258). A Firestore transaction is all-or-nothing: if the product write is denied the review status update is rolled back too. The catch in the caller surfaces only a generic toast, so the moderator sees a failure with no explanation and the review stays pending.",
+    "failure_scenario": "Sub-admin granted `reviews: view/edit/approve` but not `products: edit` opens /reviews and clicks Approve on a pending review. The transaction commit is rejected with permission-denied on `products/{productId}`; the review remains 'pending' and the product rating never updates. Approving reviews is impossible for that admin.",
+    "fix": "Either move the rating-aggregate write server-side into a `moderateReview` callable that uses `requireModule(req,'reviews','approve')`, or extend the products rule to also accept `canWrite('reviews')` when the diff is limited to `['rating','ratingCount']`."
+   },
+   {
+    "title": "Review moderation writes the products doc, so a sub-admin with only the reviews module gets permission-denied and nothing is moderated",
+    "file": "admin/src/features/reviews/api/reviews.ts",
+    "line": 64,
+    "severity": "medium",
+    "category": "security",
+    "detail": "`moderateReview()` runs one transaction that updates `reviews/{id}` and then `tx.update(pRef, { ratingCount, rating })` on `products/{productId}`. firestore.rules gates the two collections on different modules: `match /reviews/{id}` update needs `isAdmin()` (line 113) but `match /products/{id}` write needs `canWrite('products')` (line 51), and 'reviews' and 'products' are distinct keys in ModulePermissions (packages/shared/src/enums.ts). Because a Firestore transaction is all-or-nothing, the denied product write aborts the review status update too \u2014 so the approve/reject buttons silently do nothing for any sub-admin who has reviews permission but not products.",
+    "failure_scenario": "Super-admin creates a sub-admin with modulePermissions.reviews.approve = true and products = all false. That sub-admin opens /reviews and clicks Approve on a pending review: the transaction fails with PERMISSION_DENIED on products/{id}, the review stays 'pending' forever, and the customer's review never appears on the product page.",
+    "fix": "Move review moderation behind a Cloud Function guarded by `requireModule(req,'reviews','approve')` that updates both docs with the Admin SDK (matching how returns/orders are handled), or make the product-aggregate write conditional and repair the aggregate server-side."
+   },
+   {
+    "title": "Campaigns past their end date stay status 'active', so every client spin fails",
+    "file": "admin/src/features/spinner/api/spinner.ts",
+    "line": 75,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "deriveSpinStatus computes \"Ended\"/\"Scheduled\" purely from startsAt/endsAt (lines 72-76) but nothing ever persists status='ended' \u2014 the only status writer is setCampaignStatus (line 154), driven by the single Pause/Activate button (CampaignDetailPage.tsx:296), and grep shows no 'ended' write in functions/ or admin/ at all. Both clients select the campaign by status only: app/lib/features/spin/data/spin_repository.dart:22 (`where('status','==','active').limit(1)`) and web/src/app/(shop)/account/rewards/page.tsx:52. executeSpin, however, does enforce the window (functions/src/spin/execute.ts:57-59).",
+    "failure_scenario": "A 30-day campaign created with \"Activate immediately\" reaches its end date. Admin list shows it as \"Ended\" so nobody touches it. The app Spin screen still renders the wheel and says \"1 spin left today\"; every tap of \"Spin now\" round-trips to executeSpin and comes back failed-precondition \"This spin campaign is not active right now\" \u2014 a permanently broken screen with no way for the customer to know why.",
+    "fix": "Have the clients filter the window too (startsAt <= now <= endsAt), and/or flip status to 'ended' \u2014 either in a scheduled sweep like couponExpirySweep, or lazily in executeSpin when it detects now > endsAt."
+   },
+   {
+    "title": "Deep-link type \"Custom URL\" is offered and required by admin but is a no-op in the app inbox",
+    "file": "admin/src/features/notifications/api/notifications.ts",
+    "line": 123,
+    "severity": "medium",
+    "category": "cross-surface-mismatch",
+    "detail": "DEEP_LINK_TYPES exposes `url`, and NotificationCreatePage.tsx:80 hard-requires a value for it (\"Enter a URL to link to.\") before the broadcast can be sent; the CF stores it as deepLink {type:'url', target:'https://\u2026'} (functions/src/notifications/broadcast.ts:57). The app inbox parses the object correctly (app/lib/features/notifications/data/app_notification.dart:55-72) but its tap handler only switches on 'product', 'category' and 'home' \u2014 'url' falls into `default: break;` (app/lib/features/notifications/notifications_screen.dart:179-181). No other surface consumes the notification deep link.",
+    "failure_scenario": "Admin sends \"Eid sale is live\" with deep link Custom URL \u2192 https://barkath.in/eid. A customer taps the notification card in the app: it is marked read and absolutely nothing else happens \u2014 no navigation, no browser, no error.",
+    "fix": "Either handle type 'url' in _onTap (url_launcher is already a dependency, used by the Help centre) or drop 'url' from DEEP_LINK_TYPES so admins cannot pick a destination that no client can open."
+   },
+   {
+    "title": "\"Enable affiliate wallet access\" toggle is a no-op \u2014 walletEnabled is sent, validated, then discarded",
+    "file": "admin/src/features/affiliate/routes/AllocateAffiliatePage.tsx",
+    "line": 115,
+    "severity": "medium",
+    "category": "dead-button",
+    "detail": "The Toggle drives `walletEnabled` state (line 33), which is forwarded through `allocateAffiliate({ uid, commissionRate, walletEnabled })` (line 55, api/affiliate.ts:58-65) into the callable. functions/src/affiliate/withdrawals.ts:20 accepts `walletEnabled: z.boolean().optional()` in the schema but line 23 destructures only `{ uid, commissionRate }` \u2014 the value is never written to the affiliate map (lines 32-42) and no field named `walletEnabled` exists anywhere on customer docs (repo-wide grep only hits `settings/paymentGateway.walletEnabled`, an unrelated checkout flag). The confirm dialog at line 130 even promises \"and affiliate wallet access\".",
+    "failure_scenario": "Admin allocates an affiliate with the wallet toggle OFF and confirms a dialog saying wallet access is withheld. The server grants full affiliate access anyway; the affiliate's wallet screen and requestWithdrawal work exactly as if it were ON. There is no state at all that reflects the toggle.",
+    "fix": "Either persist it (`affiliate.walletEnabled: parsed.data.walletEnabled ?? true` in adminAllocateAffiliate, and gate requestWithdrawal on it) or remove the toggle and the payload field plus the dialog copy that references it."
+   },
+   {
+    "title": "admins.lastActiveAt / lastLoginAt are rendered but nothing ever updates them",
+    "file": "admin/src/features/subadmin/routes/SubAdminListPage.tsx",
+    "line": 144,
+    "severity": "medium",
+    "category": "missing-state",
+    "detail": "The Sub Admin table shows `timeAgo(a.lastActiveAt?.toDate?.())` and the profile sheet shows `Last login: {dateShort(admin.lastLoginAt?.toDate?.())}` (admin/src/features/account/AccountDialogs.tsx:95). Both fields are written exactly once, at creation: functions/src/admin/subAdmins.ts:44 sets `lastLoginAt: null, lastActiveAt: now`, and scripts/seed.ts:88-89 does the same. A full grep of admin/src, functions/src and scripts finds no other writer. The client cannot patch them either \u2014 firebase/firestore.rules:192 makes `/admins/{uid}` `write: if false` \u2014 and `signInAdmin` (admin/src/features/auth/api/auth.ts:18) performs no write on a successful login.",
+    "failure_scenario": "A sub-admin created six months ago and signing in daily still shows 'Last active: 6 months ago' in the Sub Admin table, and their Profile dialog shows 'Last login: \u2014' forever. A super admin auditing who is still using the console gets data that is guaranteed wrong, and cannot tell a dormant account from an active one.",
+    "fix": "Stamp `lastLoginAt`/`lastActiveAt` server-side \u2014 e.g. a small `touchAdminSession` callable guarded by requireAdmin that updates the caller's own admins doc, invoked from signInAdmin (and on route changes if 'last active' is meant to be live)."
+   }
+  ]
+ },
+ "rules": {
+  "count": 4,
+  "files": [
+   "firebase/firestore.rules"
+  ],
+  "findings": [
+   {
+    "title": "Review moderation is gated only by isAdmin() in rules \u2014 the reviews module permission is client-side hiding with no server backing",
+    "file": "firebase/firestore.rules",
+    "line": 113,
+    "severity": "high",
+    "category": "security",
+    "detail": "The rules file explicitly states (lines 15-19) that every collection admins write directly is gated by `canWrite(module)`. `/reviews/{id}` breaks that contract: `allow update: if hasAppCheck() && isAdmin() && affectedKeys().hasOnly(['status','moderatedBy','moderatedAt','updatedAt','helpfulCount'])` \u2014 any sub-admin passes, with no `reviews` module check. `allow read` is likewise `isAdmin()` for every doc. Nothing else stops this: admin/src/app/router.tsx:79 registers `/reviews` under `RequireAuth` only, and RequireAuth performs no module check \u2014 Sidebar.tsx:11-12 merely hides the nav link. admin/src/features/reviews/api/reviews.ts:50 writes the review status directly from the client (no callable, so no `requireModule`). Conversely the same transaction does `tx.update(pRef, {ratingCount, rating})` at reviews.ts:64 against `/products/{id}`, which rules gate with `canWrite('products')`.",
+    "failure_scenario": "A sub-admin is created with only `dashboard.view` enabled. The Reviews link is hidden, but typing /reviews in the URL loads the full moderation queue (read allowed by isAdmin()) and 'Reject' on any pending review succeeds \u2014 no product write is needed for pending\u2192rejected, so the rules accept it. Symmetrically, a sub-admin granted the whole `reviews` module but not `products` clicks 'Approve' and the transaction is rejected with permission-denied, because approving must write products.rating.",
+    "fix": "Change the reviews rule to `allow update: if canWrite('reviews') && affectedKeys().hasOnly([...])` (and read to `isAdmin()` is fine), and allow the ratingCount/rating aggregate write on products when `can('reviews','approve')` \u2014 or move the aggregate update into a callable guarded by `requireModule(req,'reviews','approve')`."
+   },
+   {
+    "title": "stockAdjustments create rule only checks isAdmin(), bypassing the inventory.edit module gate the rest of the file enforces",
+    "file": "firebase/firestore.rules",
+    "line": 215,
+    "severity": "medium",
+    "category": "security",
+    "detail": "Every other directly-written admin collection is gated with `can(module, action)` / `canWrite(module)` (e.g. products on line 51 uses `canWrite('products')`), and the comment on lines 15-19 states this is deliberate so \"a sub-admin with only dashboard.view\" cannot write. The stockAdjustments rule requires only `isAdmin() && request.resource.data.adminUid == uid()` - no `can('inventory','edit')` check and no validation of before/delta/after/productId. The stock mutation itself is correctly protected (requireModule(req,'inventory','edit') in functions/src/catalog/inventory.ts:26), but the audit trail that admins read in StockHistoryModal is not. The collection is append-only (`allow update, delete: if false`), so forged rows can never be removed.",
+    "failure_scenario": "A sub_admin whose modulePermissions contain only {dashboard:{view:true}} opens the browser console and writes to stockAdjustments with their own uid: {productId:'p1', before:200, delta:-180, after:20, reason:'Damage', adminName:'Someone Else'}. The write succeeds. The Stock history modal for p1 now permanently shows a fabricated 180-unit shrinkage attributed to a chosen name, and it can never be deleted.",
+    "fix": "Change the rule to `allow create: if can('inventory','edit') && request.resource.data.adminUid == uid();` and add shape validation (numeric before/delta/after, adminName matching adminDoc().name)."
+   },
+   {
+    "title": "reviews update rule is gated on isAdmin() only \u2014 any sub-admin can publish or reject reviews",
+    "file": "firebase/firestore.rules",
+    "line": 113,
+    "severity": "medium",
+    "category": "security",
+    "detail": "`allow update: if hasAppCheck() && isAdmin() && ...hasOnly(['status','moderatedBy','moderatedAt','updatedAt','helpfulCount'])`. Unlike every other admin-written collection in this file (settings/categories/products/coupons/\u2026 all use `canWrite('<module>')`, and the comment at lines 15-19 states this was deliberately tightened because 'a sub-admin with only dashboard.view could rewrite the GST rate'), the reviews rule never consults `can('reviews', \u2026)`. `isAdmin()` is true for ANY doc-holder whose claim is `sub_admin`, regardless of modulePermissions, and it does not even check `adminDoc().status == 'active'` \u2014 so a suspended sub-admin still passes.",
+    "failure_scenario": "A sub-admin whose matrix has only `dashboard: view` (or one who has been suspended via suspendSubAdmin but whose custom claim has not been revoked) calls updateDoc on reviews/{id} with `{status:'approved', helpfulCount: 9999}` \u2014 the rule accepts it and a 1-star or abusive review is published on the storefront (web ProductDetail.tsx:387 and app reviews_repository.dart:19-21 both read `status == 'approved'` publicly).",
+    "fix": "Change to `allow update: if hasAppCheck() && can('reviews','edit') || can('reviews','approve')` (mirroring the `canWrite()` pattern used for the other direct-write collections), which also picks up the `adminDoc().status == 'active'` check."
+   },
+   {
+    "title": "stockAdjustments audit ledger accepts writes from any admin with no inventory permission check",
+    "file": "firebase/firestore.rules",
+    "line": 215,
+    "severity": "medium",
+    "category": "security",
+    "detail": "`allow create: if isAdmin() && request.resource.data.adminUid == uid();` \u2014 the only constraint is that the forger stamps their own uid. There is no `can('inventory', \u2026)` gate and no `adminDoc().status == 'active'` check, even though `inventory` is a real MODULE_KEY (packages/shared/src/enums.ts:257) and the collection is described in the rule's own comment as the append-only stock-adjustment ledger. The ledger is the audit trail read back by admin/src/features/inventory/api/inventory.ts:150 `getStockHistory()`, and it is written client-side by addLedger (inventory.ts:129-144) with fully client-supplied `before`/`delta`/`after`/`reason`/`adminName`.",
+    "failure_scenario": "A sub-admin with only `dashboard: view` (or a suspended one whose claim is still live) writes `stockAdjustments/{newId}` with `{productId:'p1', before: 500, delta: -480, after: 20, reason:'Damaged', adminUid: <self>, adminName:'Someone Else'}`. The Stock History panel for p1 now shows a fabricated 480-unit write-off that no real stock movement backs, and because `update, delete: if false` it can never be removed.",
+    "fix": "Gate the create on the inventory module: `allow create: if can('inventory','create') && request.resource.data.adminUid == uid();` \u2014 matching how the paired stock mutation is already gated server-side via requireModule."
+   }
+  ]
+ },
+ "seed": {
+  "count": 2,
+  "files": [
+   "scripts/seed.ts"
+  ],
+  "findings": [
+   {
+    "title": "seed writes spin-slice `discountPercent` as a fraction (0.15) while admin/app/web/CF all treat it as an integer percent",
+    "file": "scripts/seed.ts",
+    "line": 747,
+    "severity": "high",
+    "category": "cross-surface-mismatch",
+    "detail": "scripts/seed.ts:747 seeds slice `s2` as `{ prizeType:'percent_discount', discountPercent: 0.15, displayLabel:'15% off' }`. Every reader treats the field as whole percent: admin/src/features/spinner/routes/CampaignDetailPage.tsx:73 (`percent: s.discountPercent`) and rowToSlice writes `Number(r.percent)` straight from a `%` number input; functions/src/orders/checkout.ts:170-171 computes `Math.round(subtotal * pct / 100)`; web/src/components/wallet/actions.ts:122 renders `${c.discountPercent}% off`; and the app parses it through `_int()` (app/lib/features/spin/data/spin_campaign.dart:48 and app/lib/features/coupons/data/user_coupon.dart:102), where `(0.15).toInt() == 0`. `executeSpin` copies the slice value verbatim onto the issued coupon (functions/src/spin/execute.ts:132).",
+    "failure_scenario": "On the seeded dataset a customer spins and lands on the '15% off' slice. `executeSpin` writes `customers/{uid}/coupons/{id}` with `discountPercent: 0.15`. My Coupons renders `UserCoupon.headline` as \"0% off\" (0.15 truncated by `_int`), the checkout offer list (app/lib/features/checkout/data/offers.dart:63) computes `pct = 0` so the coupon shows a \u20b90 discount, and the server applies `Math.round(subtotal * 0.15 / 100)` \u2248 \u20b90.15 on a \u20b91000 cart instead of \u20b9150. Web shows \"0.15% off\".",
+    "fix": "Change scripts/seed.ts:747 to `discountPercent: 15` (and audit any other seeded percent fields for the same 0..1 vs 0..100 scale). Optionally have `SpinSlice.fromMap`/`UserCoupon.fromDoc` round rather than truncate so bad data degrades visibly instead of silently becoming 0."
+   },
+   {
+    "title": "Seeded ops sub-admin is granted a non-existent `returns` module, so the real `refunds` module is all-false \u2014 Refunds is hidden and approve/reject is permission-denied",
+    "file": "scripts/seed.ts",
+    "line": 121,
+    "severity": "medium",
+    "category": "cross-surface-mismatch",
+    "detail": "`scopedPerms(['dashboard','orders','customers','payments','returns'])` builds permissions by iterating `MODULE_KEYS` and testing `modules.includes(m)` (seed.ts:46-50). `MODULE_KEYS` contains `'refunds'`, not `'returns'` (packages/shared/src/enums.ts:262, with the comment \"was 'replacement', then 'returns' \u2014 renamed\"). So the doc gets `modulePermissions.refunds = ALL_ACTIONS_FALSE` and the `'returns'` string is silently dropped. The admin sidebar gates on `admin?.modulePermissions?.[item.module]?.view === true` (admin/src/components/layout/Sidebar.tsx:12), and both callables call `requireModule(req,'refunds','approve')` (functions/src/returns/decisions.ts:15 and :133).",
+    "failure_scenario": "Sign in to the admin panel as ops@barkath.app (sub_admin). The 'Refunds' nav item is missing entirely. Navigating directly to /refunds still renders the page (there is no route-level permission guard) and the list loads because firestore.rules:90-92 only requires isAdmin(); clicking 'Approve & refund' then fails with 'Missing refunds.approve permission.' The operator role intended to handle returns cannot handle any return.",
+    "fix": "Change the seeded module list to `'refunds'` (and add a route-level permission guard so a module the sidebar hides is not reachable by URL with working-looking buttons)."
+   }
+  ]
+ }
+}

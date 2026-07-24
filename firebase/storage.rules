@@ -1,0 +1,84 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isAdmin() {
+      return request.auth != null &&
+        (request.auth.token.role == 'super_admin' || request.auth.token.role == 'sub_admin');
+    }
+    function isImage() {
+      return request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+    /**
+     * Content-type only, no size cap — the admin catalogue uploads originals
+     * straight from the operator's machine (products/banners/categories all
+     * `uploadBytes(file)` with no client-side resize), so a 5 MB ceiling here
+     * would reject product photography that works today.
+     *
+     * These three prefixes are `allow read` with no condition, i.e. every
+     * object under them is served publicly from the project's Storage domain.
+     * Storage rules cannot reach Firestore, so the per-module admin matrix is
+     * unenforceable here and ANY admin — including a sub-admin holding only
+     * dashboard.view — can write them. Without a type check that is an
+     * open-ended "host arbitrary bytes on the store's own domain" primitive
+     * (an HTML phishing page under /products/x/, or unbounded junk on the
+     * storage bill). Every writer in the admin panel is an
+     * `accept="image/*"` picker, so restricting the type breaks nothing.
+     */
+    function isImageType() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    // create/update and delete are split deliberately: a delete carries no
+    // `request.resource`, so folding the type check into a single `write` rule
+    // would make `request.resource.contentType` error out and deny every
+    // delete — and admin/src/lib/storage.ts deleteStorageFolder() removes these
+    // objects whenever a product / category / banner is deleted.
+    match /products/{productId}/{allPaths=**} {
+      allow read;
+      allow create, update: if isAdmin() && isImageType();
+      allow delete: if isAdmin();
+    }
+    match /categories/{categoryId}/{allPaths=**} {
+      allow read;
+      allow create, update: if isAdmin() && isImageType();
+      allow delete: if isAdmin();
+    }
+    match /banners/{bannerId}/{allPaths=**} {
+      allow read;
+      allow create, update: if isAdmin() && isImageType();
+      allow delete: if isAdmin();
+    }
+    match /flashSales/{saleId}/{allPaths=**} {
+      allow read;
+      allow create, update: if isAdmin() && isImageType();
+      allow delete: if isAdmin();
+    }
+    match /content/{contentId}/{allPaths=**}     { allow read; allow write: if isAdmin(); }
+    match /exports/{fileName}                    { allow read: if isAdmin(); allow write: if false; }
+
+    // Invoices: NO direct client read. The path is `invoices/{shortId}.html`
+    // (orders/invoice.ts) — sequential and trivially guessable, so allowing any
+    // signed-in user to read the path let anyone enumerate every customer's
+    // invoice, names and addresses included. adminGenerateInvoice returns a
+    // tokenised download URL, which authenticates by token and bypasses these
+    // rules, so every legitimate reader (app, web, admin all open
+    // `order.invoiceUrl`) is unaffected.
+    match /invoices/{fileName} { allow read: if false; allow write: if false; }
+
+    match /reviews/{reviewId}/{fileName}       { allow read; allow write: if false; }
+    match /orderRequests/{requestId}/{fileName} { allow read: if request.auth != null; allow write: if false; }
+
+    match /avatars/{uid}/{fileName} {
+      allow read;
+      allow write: if request.auth != null && request.auth.uid == uid && isImage();
+    }
+    match /adminAvatars/{adminUid}/{fileName} {
+      allow read: if isAdmin();
+      allow write: if request.auth != null && request.auth.uid == adminUid && isImage();
+    }
+    match /admin/uploads/{fileName} { allow read, write: if isAdmin(); }
+
+    match /{allPaths=**} { allow read, write: if false; }
+  }
+}

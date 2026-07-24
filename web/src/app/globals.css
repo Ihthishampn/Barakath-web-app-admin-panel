@@ -1,0 +1,132 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * Barakath web design tokens — values taken verbatim from the Figma file
+ * (BARAKAT_ECOM). Figma style names are noted so a token can be traced back.
+ * Evergreen primary, gold money accent, neutral greys.
+ */
+:root {
+  --brand-primary: #0f7a5a; /* Salem      — View all, add-to-bag, primary CTA */
+  --brand-primary-dark: #166534; /* Jewel      — announcement bar, footer */
+  --brand-primary-subtle: #e6f0ec;
+  --brand-gold: #daa227; /* Golden Grass — hero accent, gold CTA */
+  --brand-gold-strong: #b8881f; /* Mandalay   — prices, bag badge */
+  --brand-gold-subtle: #f7edd6;
+  --brand-gold-border: #e7d3a3;
+
+  --text-primary: #000000; /* Black */
+  --text-secondary: #7f7f7f; /* Gray        — subtitles, product counts, rating */
+  --text-tertiary: #9ea2ad; /* Santas Gray — placeholders, struck-through price */
+
+  --surface-app: #fcfcfb; /* Desert Storm */
+  --surface-card: #ffffff; /* White */
+
+  --border-subtle: #ececec; /* Gallery */
+  --border-default: #ececec; /* Gallery */
+
+  --success: #1f8a5b;
+  --success-subtle: #e4f2ea;
+  --error: #fb3748; /* Coral Red — discount badge, countdown pill */
+  --error-subtle: #fbeaea;
+  --info: #2a6fdb;
+  --info-subtle: #e7eefb;
+
+  --neutral-200: #efeeea;
+  --neutral-300: #e2dfd7;
+
+  --scrim: rgba(30, 24, 16, 0.45);
+
+  --shadow-sm: 0 1px 2px rgba(95, 74, 46, 0.06);
+  --shadow-md: 0 4px 12px rgba(95, 74, 46, 0.08);
+  --shadow-lg: 0 12px 32px rgba(95, 74, 46, 0.12);
+
+  --font-display: var(--font-manrope), ui-sans-serif, system-ui, sans-serif;
+  --font-ui: var(--font-manrope), ui-sans-serif, system-ui, sans-serif;
+
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--surface-app);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Hide scrollbars but keep scroll (prototype look). */
+.bk-scroll::-webkit-scrollbar {
+  display: none;
+}
+.bk-scroll {
+  scrollbar-width: none;
+}
+
+/**
+ * Dual price-range slider (catalogue filter sidebar).
+ *
+ * Two native <input type="range"> elements are stacked on top of one 5px track
+ * so dragging, touch, keyboard and screen-reader support come from the platform.
+ * The inputs are full-width and overlap, so the one painted last would swallow
+ * every click: the inputs opt out of pointer events entirely and only the thumbs
+ * take them back — that keeps BOTH handles grabbable anywhere on the track.
+ *
+ * The thumb rules are repeated per engine on purpose. A comma-joined selector
+ * list containing an unknown vendor pseudo-element is discarded wholesale, so
+ * ::-webkit-slider-thumb and ::-moz-range-thumb must be declared separately.
+ */
+.bk-range {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  pointer-events: none;
+}
+.bk-range:focus {
+  outline: none; /* replaced by the focus-visible ring on the thumb below */
+}
+.bk-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  pointer-events: auto;
+  height: 16px;
+  width: 16px;
+  border-radius: 999px;
+  border: 2px solid var(--brand-primary);
+  background: var(--surface-card);
+  cursor: pointer;
+}
+.bk-range::-moz-range-thumb {
+  pointer-events: auto;
+  box-sizing: border-box;
+  height: 16px;
+  width: 16px;
+  border-radius: 999px;
+  border: 2px solid var(--brand-primary);
+  background: var(--surface-card);
+  cursor: pointer;
+}
+/* Firefox paints its own track/progress fill — hide both, the div behind shows. */
+.bk-range::-moz-range-track,
+.bk-range::-moz-range-progress {
+  background: transparent;
+  border: none;
+}
+.bk-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px var(--brand-primary-subtle);
+}
+.bk-range:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 3px var(--brand-primary-subtle);
+}
+
+/* Announcement carousel — fade each rotating message in. */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

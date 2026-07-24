@@ -1,0 +1,26 @@
+{
+  "name": "barkath",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Barkath multi-category e-commerce ecosystem (web + admin + mobile + Firebase backend)",
+  "packageManager": "pnpm@9.7.0",
+  "engines": {
+    "node": ">=20 <21"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "emulators": "firebase emulators:start --import=./.seed --export-on-exit",
+    "deploy:rules": "firebase deploy --only firestore:rules,storage",
+    "deploy:indexes": "firebase deploy --only firestore:indexes",
+    "deploy:functions": "firebase deploy --only functions"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "turbo": "^2.0.9",
+    "typescript": "^5.5.3"
+  }
+}

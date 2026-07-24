@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+lib/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# Turbo
+.turbo/
+
+# Env & secrets — NEVER commit
+.env
+.env.*
+!.env.example
+*serviceAccount*.json
+service-account*.json
+.runtimeconfig.json
+
+# Firebase
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+.seed/
+
+# Flutter (apps/mobile)
+apps/mobile/.dart_tool/
+apps/mobile/.flutter-plugins
+apps/mobile/.flutter-plugins-dependencies
+apps/mobile/build/
+apps/mobile/ios/Pods/
+apps/mobile/android/.gradle/
+apps/mobile/**/google-services.json
+apps/mobile/**/GoogleService-Info.plist
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.log
+
+# Test
+coverage/
+playwright-report/
+test-results/
+
+# Secrets (service-account keys, never commit)
+.secrets/

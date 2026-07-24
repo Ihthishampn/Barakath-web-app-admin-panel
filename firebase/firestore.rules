@@ -1,0 +1,450 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ========== Helpers ==========
+    function isSignedIn() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+    function isOwner(userId) { return isSignedIn() && uid() == userId; }
+
+    // Admin identity comes from custom claims mirrored by setAdminClaims CF.
+    function role() { return request.auth.token.role; }
+    function isAdmin() { return isSignedIn() && (role() == 'super_admin' || role() == 'sub_admin'); }
+
+    // ORDERING MATTERS on owner-or-admin reads: always write
+    //   canView('<module>') || isOwner(resource.data.<field>)
+    // never the other way round. Aggregation queries (count/sum — the admin
+    // dashboard KPIs and revenue trend) must be provable WITHOUT reading the
+    // documents, so a rule whose first operand touches `resource.data` makes
+    // every aggregate fail with permission-denied. Short-circuiting on the
+    // admin check keeps aggregates working while customers still read only
+    // their own documents.
+    function isSuperAdmin() { return isSignedIn() && role() == 'super_admin'; }
+
+    // Per-module permission gate for the collections admins write DIRECTLY
+    // (no Cloud Function in between). Previously every one of these accepted
+    // any admin, so a sub-admin with only dashboard.view could rewrite the GST
+    // rate or the privacy policy. Cloud-Function-backed modules enforce the
+    // same matrix server-side via requireModule().
+    function adminDoc() {
+      return get(/databases/$(database)/documents/admins/$(uid())).data;
+    }
+    // The custom claim is only a cheap pre-filter (it keeps customers from ever
+    // triggering the get()); the STORED doc is the authority. Claims live in an
+    // ID token for up to an hour, so a claim-only check kept a suspended or
+    // demoted admin fully privileged until their token expired — the callables
+    // re-check the doc for exactly this reason, and the rules now match them.
+    // Super admins are decided by role alone: their permission map is not
+    // guaranteed to carry every module key, so indexing it would error out.
+    function can(module, action) {
+      return isAdmin()
+        && adminDoc().status == 'active'
+        && (adminDoc().role == 'super_admin'
+            || adminDoc().modulePermissions[module][action] == true);
+    }
+    /** Any write verb on a module: create/edit/delete collapse to one check. */
+    function canWrite(module) {
+      return can(module, 'create') || can(module, 'edit') || can(module, 'delete');
+    }
+    /**
+     * Read gate for the operational collections.
+     *
+     * These were all a bare isAdmin(), which made the `view` permission the
+     * sub-admin form collects purely decorative: the sidebar hid the link and
+     * nothing else. A sub-admin created with only banner.view could type
+     * /customers and read every name, phone and email, or /orders and /payments
+     * for the full revenue picture. Writes were already per-module; reads now
+     * match. Super admins short-circuit before the admins-doc get().
+     */
+    function canView(module) { return can(module, 'view'); }
+    // App Check. Both clients initialise it as soon as an APPCHECK_SITE_KEY env
+    // var is present (see web + admin lib/firebase.ts). Once you have registered
+    // a reCAPTCHA v3 key in the Firebase console AND deployed both clients with
+    // it set, flip this single line to `request.app != null` and redeploy the
+    // rules — that is the whole switch. Flipping it BEFORE the clients ship the
+    // key would deny every read.
+    function hasAppCheck() { return true; }
+
+    function onlyFields(allowed) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(allowed);
+    }
+
+    // ========== Public catalog / config (read) · admin write ==========
+    match /settings/{docId}      { allow read: if hasAppCheck(); allow write: if canWrite('settings'); }
+    match /content/{docId}       { allow read: if hasAppCheck(); allow write: if canWrite('settings'); }
+    match /categories/{id}       { allow read: if hasAppCheck(); allow write: if canWrite('categories'); }
+    match /products/{id} {
+      allow read: if hasAppCheck();
+      allow write: if canWrite('products');
+      // The rating aggregate is NOT writable by review moderators from the
+      // client: approving/rejecting a review goes through the
+      // adminModerateReview callable, which checks the reviews permission and
+      // recomputes rating/ratingCount server-side (functions reviews/moderation).
+    }
+    match /flashSales/{id}       { allow read: if hasAppCheck(); allow write: if canWrite('flashSale'); }
+    match /newArrivals/{id}      { allow read: if hasAppCheck(); allow write: if canWrite('newArrivals'); }
+    match /banners/{id}          { allow read: if hasAppCheck(); allow write: if canWrite('banner'); }
+    match /spinCampaigns/{id}    { allow read: if hasAppCheck() && isSignedIn(); allow write: if canWrite('spinnerCampaigns'); }
+    match /pincodes/{code}       { allow read: if true;          allow write: if canWrite('settings'); }
+
+    // Global coupons: authed read (checkout validation), admin write.
+    match /coupons/{id}          { allow read: if hasAppCheck() && isSignedIn(); allow write: if canWrite('coupons'); }
+
+    // ========== Orders (owner/admin read; CF-only write) ==========
+    match /orders/{orderId} {
+      // dashboard.view is included deliberately: revenue, order counts and the
+      // recent-orders panel ARE the dashboard, so granting it without order
+      // reads would leave that admin staring at a screen of em-dashes.
+      allow read: if hasAppCheck()
+        && (canView('orders') || canView('dashboard') || isOwner(resource.data.customerId));
+      allow write: if false;
+      match /items/{itemId} {
+        allow read: if hasAppCheck() && (canView('orders') ||
+          isOwner(get(/databases/$(database)/documents/orders/$(orderId)).data.customerId));
+        allow write: if false;
+      }
+      match /timeline/{entryId} {
+        allow read: if hasAppCheck() && (canView('orders') ||
+          isOwner(get(/databases/$(database)/documents/orders/$(orderId)).data.customerId));
+        allow write: if false;
+      }
+    }
+    match /payments/{id} {
+      allow read: if hasAppCheck() && (canView('payments') || isOwner(resource.data.customerId));
+      allow write: if false;
+    }
+
+    // Checkout stock holds. The customer may watch their own hold (the checkout
+    // countdown reads expiresAt), but never write one: a reservation moves real
+    // inventory, so it is created/released/consumed only by reserveStock,
+    // releaseStock, placeOrder and stockReservationSweep.
+    match /stockReservations/{id} {
+      allow read: if hasAppCheck() && isOwner(resource.data.customerId);
+      allow write: if false;
+    }
+
+    // ========== Money / privileged ledgers (CF-only write) ==========
+    match /withdrawalRequests/{id} {
+      allow read: if hasAppCheck() && (canView('affiliateProgram') || isOwner(resource.data.customerId));
+      allow write: if false;
+    }
+    match /commissions/{id} {
+      allow read: if hasAppCheck() && (canView('affiliateProgram') || isOwner(resource.data.affiliateUid));
+      allow write: if false;
+    }
+    match /orderRequests/{id} {   // returns
+      allow read: if hasAppCheck() && (canView('refunds') || isOwner(resource.data.customerId));
+      allow write: if false;
+    }
+    match /spinHistory/{id} {
+      allow read: if hasAppCheck() && (canView('spinnerCampaigns') || isOwner(resource.data.customerId));
+      allow write: if false;
+    }
+    match /reviews/{id} {
+      allow read: if hasAppCheck() && (canView('reviews')
+        || resource.data.status == 'approved' || isOwner(resource.data.customerId));
+      // A customer may review ONLY a product they have actually received.
+      //
+      // This used to accept any signed-in user for any product, so anyone could
+      // rate anything they had never bought — the whole rating aggregate was
+      // forgeable. Rules cannot query "does this customer have a delivered order
+      // containing this product", but adminChangeOrderStatus writes a
+      // customers/{uid}/purchases/{productId} doc on delivery precisely so the
+      // check collapses to a single exists().
+      //
+      // Everything the create did NOT name was attacker-chosen. Three of those
+      // fields are rendered verbatim once a moderator approves the review:
+      //   - `photoUrls` is spread into <img src> on the product page
+      //     (web ProductDetail). Storage denies every client write under
+      //     reviews/{id} (storage.rules), so a legitimate client can never
+      //     produce a URL for it — an entry could therefore only ever be a
+      //     third-party URL the customer chose, i.e. an off-site image or
+      //     tracking pixel embedded in the storefront. It must be empty.
+      //   - `createdAt` is the sort key every review list uses (all three
+      //     surfaces sort client-side, newest first). A client-chosen
+      //     year-3000 timestamp pins one review to the top of a product for
+      //     ever. Both clients send serverTimestamp(), which rules see as
+      //     request.time, so requiring that costs nothing.
+      //   - `moderatedAt` alongside `moderatedBy` must start empty or the
+      //     review arrives looking pre-moderated in the admin queue.
+      // The key list is exactly what web ReviewForm and the app's
+      // ReviewsRepository.submit() write — verified identical on both.
+      //
+      // The document id is BOUND to `${uid}_${productId}`, which is what caps a
+      // customer at one review per product. The purchase proof above is an
+      // exists() on a doc that is never consumed, so with auto-ids one genuine
+      // purchase let the same customer post unlimited reviews for that product
+      // — and adminModerateReview recomputes the aggregate from the approved
+      // set, so every extra approval genuinely moved the product's rating. A
+      // second submission is now an update of the same id, which the rule below
+      // only permits for the fields an owner may edit.
+      allow create: if hasAppCheck() && isSignedIn()
+        && request.resource.data.customerId == uid()
+        && id == uid() + '_' + request.resource.data.productId
+        && exists(/databases/$(database)/documents/customers/$(uid())/purchases/$(request.resource.data.productId))
+        && request.resource.data.status == 'pending'
+        && request.resource.data.rating is number
+        && request.resource.data.rating >= 1
+        && request.resource.data.rating <= 5
+        && request.resource.data.productId is string
+        && request.resource.data.moderatedBy == null
+        && request.resource.data.helpfulCount == 0
+        && request.resource.data.keys().hasOnly([
+             'id','productId','customerId','customerName','orderId','rating','title','body',
+             'photoUrls','status','moderatedBy','moderatedAt','helpfulCount',
+             'createdAt','updatedAt',
+           ])
+        && request.resource.data.moderatedAt == null
+        && request.resource.data.photoUrls.size() == 0
+        && request.resource.data.body is string
+        && request.resource.data.body.size() <= 4000
+        && request.resource.data.customerName is string
+        && request.resource.data.customerName.size() <= 80
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      // Moderation is privileged and CF-only, like every other decision that
+      // also has to touch a second, differently-gated collection: publishing a
+      // review moves the product's rating aggregate, so it runs inside the
+      // adminModerateReview callable (requireModule('reviews') + one
+      // transaction). No client — admin included — may update a review directly.
+      allow update, delete: if false;
+    }
+    match /supportTickets/{ticketId} {
+      allow read: if hasAppCheck() && (isAdmin() || isOwner(resource.data.customerId));
+      allow write: if false;
+      match /replies/{replyId} {
+        allow read: if hasAppCheck() && (isAdmin() ||
+          isOwner(get(/databases/$(database)/documents/supportTickets/$(ticketId)).data.customerId));
+        // Stamping your own uid on the reply is not the same as being party to
+        // the conversation: the create only checked `authorUid == uid()`, so any
+        // signed-in customer could append a reply to ANY ticket id — replies
+        // they could not read back, but which the ticket owner and every admin
+        // then see attributed to a genuine account. The author must be the
+        // ticket's own customer, or an admin answering it.
+        allow create: if hasAppCheck() && isSignedIn()
+          && request.resource.data.authorUid == uid()
+          && (isAdmin() ||
+              isOwner(get(/databases/$(database)/documents/supportTickets/$(ticketId)).data.customerId));
+        allow update, delete: if false;
+      }
+    }
+
+    // ========== Customers ==========
+    match /customers/{userId} {
+      allow read: if hasAppCheck() && (isOwner(userId) || canView('customers'));
+      allow update: if hasAppCheck() && isOwner(userId)
+        && onlyFields(['name','email','gstin','avatarUrl','profileComplete','profileSkipped',
+                       'preferences','lastActiveAt','cart','addresses','bankAccounts','searchIndex','updatedAt'])
+        && (!('cart' in request.resource.data) || request.resource.data.cart.size() <= 50)
+        && (!('addresses' in request.resource.data) || request.resource.data.addresses.size() <= 10)
+        && (!('bankAccounts' in request.resource.data) || request.resource.data.bankAccounts.size() <= 5);
+      // The owner may self-create their own customer doc, but ONLY with
+      // non-privileged defaults.
+      //
+      // This used to name five fields and let anything else through. Everything
+      // it did not name was therefore attacker-chosen on a brand-new account —
+      // `spinsRemaining: 1000000` bought unlimited spin-wheel cashback (real
+      // wallet money, see functions/src/spin/execute.ts) and `stats.ordersCount`
+      // forged eligibility for returning-customer coupons. Nothing normalises
+      // this doc afterwards, so the forged values simply stood.
+      //
+      // Now it is an explicit allowlist: every privileged counter must be
+      // absent or zero, and no key outside this set may appear at all.
+      allow create: if hasAppCheck() && isOwner(userId)
+        && request.resource.data.uid == userId
+        && request.resource.data.role == 'customer'
+        && request.resource.data.isBlocked == false
+        && request.resource.data.profileComplete == false
+        && request.resource.data.affiliate == null
+        && request.resource.data.wallet.balancePaise == 0
+        // Exactly the 30 keys web/src/lib/customerDoc.ts defaultCustomer() and
+        // app .../auth_repository.dart _defaultCustomer() write — verified
+        // identical on both clients. Adding a field to either client means
+        // adding it here too, or first sign-in breaks.
+        && request.resource.data.keys().hasOnly([
+             'id','uid','phone','phoneVerified','name','email','emailVerified','gstin',
+             'avatarUrl','profileComplete','profileSkipped','role','isBlocked','blockReason',
+             'blockedAt','blockedByUid','wallet','spinsRemaining','affiliate','referredBy',
+             'preferences','stats','cart','addresses','bankAccounts','searchIndex',
+             'lastLoginAt','lastActiveAt','createdAt','updatedAt',
+           ])
+        // Moderation state is the admin's, never the account holder's.
+        && request.resource.data.blockReason == null
+        && request.resource.data.blockedAt == null
+        && request.resource.data.blockedByUid == null
+        // Earned/granted balances start empty — only Cloud Functions move them.
+        && (!('spinsRemaining' in request.resource.data)
+            || request.resource.data.spinsRemaining == 0)
+        && (!('referredBy' in request.resource.data)
+            || request.resource.data.referredBy == null)
+        && (!('stats' in request.resource.data)
+            || (request.resource.data.stats.get('ordersCount', 0) == 0
+                && request.resource.data.stats.get('totalSpentPaise', 0) == 0))
+        && (!('cart' in request.resource.data) || request.resource.data.cart.size() <= 50)
+        && (!('addresses' in request.resource.data) || request.resource.data.addresses.size() <= 10)
+        && (!('bankAccounts' in request.resource.data) || request.resource.data.bankAccounts.size() <= 5);
+      allow delete: if false;
+
+      match /wishlist/{productId} {
+        allow read: if hasAppCheck() && (isOwner(userId) || canView('customers'));
+        allow write, delete: if hasAppCheck() && isOwner(userId);
+      }
+      // Review eligibility: written ONLY by adminChangeOrderStatus on delivery.
+      // The owner reads it so the client can decide whether to offer "Write a
+      // review"; a client write would let anyone grant themselves the right to
+      // review a product they never bought, which is the whole point of it.
+      match /purchases/{productId} {
+        allow read: if hasAppCheck() && (isOwner(userId) || canView('customers'));
+        allow write: if false;
+      }
+      match /walletTransactions/{txId} {
+        allow read: if hasAppCheck() && (isOwner(userId) || canView('customers'));
+        allow write: if false;
+      }
+      match /coupons/{couponId} {
+        allow read: if hasAppCheck() && (isOwner(userId) || canView('customers'));
+        allow write: if false;
+      }
+      /**
+       * Per-customer redemption counter for a PROMOTIONAL coupon, keyed by the
+       * coupons/{id} document id. Written only by placeOrder (count + 1,
+       * lastUsedAt, lastOrderId) and performCancellation (cancelledCount,
+       * lastCancelledAt) — both Admin SDK, which bypasses these rules.
+       *
+       * It had NO match block at all, so it fell through to the deny-all
+       * catch-all with two consequences:
+       *   1. The owner could not read their own count, so neither storefront
+       *      could tell that a coupon capped at `maxUsesPerUser` was already
+       *      spent. The checkout offer list therefore kept rendering an Apply
+       *      button that placeOrder/applyCoupon then rejected with "already
+       *      used" — a guaranteed dead button on every exhausted coupon.
+       *   2. No admin could audit redemptions; the Coupons module could see the
+       *      global usesCount and never who spent it.
+       *
+       * The document holds only the customer's own redemption history
+       * (id, customerId, count, lastUsedAt, lastOrderId, cancelledCount,
+       * lastCancelledAt) — nothing another party owns and no coupon secret —
+       * so owner read leaks nothing the owner did not create themselves.
+       * Writes stay server-only: the counter IS the redemption limit.
+       */
+      match /couponUsage/{couponId} {
+        allow read: if hasAppCheck() && (isOwner(userId) || canView('coupons'));
+        allow write: if false;
+      }
+      match /notifications/{notificationId} {
+        allow read: if hasAppCheck() && (isOwner(userId) || canView('customers'));
+        // Owners may only flip their own read receipt — the notification body
+        // itself stays server-written. Without this, marking read fails silently
+        // and the unread badge can never clear.
+        allow update: if hasAppCheck() && isOwner(userId)
+          && onlyFields(['read', 'readAt'])
+          && request.resource.data.read == true;
+        allow create, delete: if false;
+      }
+    }
+
+    // ========== Users directory (temp phone→uid index for auth gating) ==========
+    // Pre-auth existence check: a single-doc `get` is public (so the sign-in
+    // screen can say "register first" and register can say "already registered"),
+    // but the collection is NOT listable. Created by the owner once their session
+    // exists. NOTE: with real MSG91 this check moves server-side into the sendOtp
+    // Cloud Function and this collection can be locked down.
+    match /users/{phoneKey} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if isSignedIn() && request.resource.data.uid == uid();
+      allow update, delete: if false;
+    }
+
+    // ========== Admins ==========
+    match /admins/{adminUid} {
+      // `subAdmin.view` was a dead toggle: the matrix collected it, the sidebar
+      // honoured it, and this rule then refused the list to anyone but a super
+      // admin, so the screen only ever said "Couldn't load admins". Reading an
+      // admin's own doc stays unconditional — the session depends on it.
+      // Mutations remain super-admin-only, via the CFs.
+      allow read: if hasAppCheck() && isSignedIn()
+        && (uid() == adminUid || canView('subAdmin'));
+      // Sign-in activity stamps are the ONE thing an admin may write on their
+      // own doc: the Sub Admin list renders lastActiveAt / lastLoginAt and
+      // nothing was allowed to set them, so every row read "never". Both fields
+      // must carry the server clock, so the value cannot be back/forward-dated,
+      // and no other field may ride along.
+      allow update: if isSignedIn() && isAdmin() && uid() == adminUid
+        && onlyFields(['lastLoginAt', 'lastActiveAt'])
+        && request.resource.data.lastActiveAt == request.time
+        && (request.resource.data.lastLoginAt == resource.data.lastLoginAt
+            || request.resource.data.lastLoginAt == request.time);
+      allow create, delete: if false; // via createSubAdmin/updateSubAdmin/... CFs only
+    }
+
+    // Per-admin bell alerts (CF-authored; admin marks read).
+    match /adminAlerts/{adminUid}/alerts/{alertId} {
+      allow read: if isSignedIn() && uid() == adminUid;
+      allow update: if isSignedIn() && uid() == adminUid
+        && onlyFields(['read']);
+      allow create, delete: if false;
+    }
+
+    // ========== fcmTokens (self-managed) ==========
+    // Doc id IS the FCM registration token; adminSendBroadcastNotification
+    // multicasts to the ids it selects by customerId. Never client-readable — a
+    // listable token collection is a device-targeting list.
+    match /fcmTokens/{token} {
+      allow read: if false;
+      allow create: if hasAppCheck() && isSignedIn()
+        && request.resource.data.customerId == uid();
+      // BOTH sides checked on update. Checking only the incoming customerId let
+      // any signed-in user reassign a token they had seen to themselves, and
+      // start receiving that device's notifications.
+      allow update: if hasAppCheck() && isSignedIn()
+        && resource.data.customerId == uid()
+        && request.resource.data.customerId == uid();
+      allow delete: if hasAppCheck() && isSignedIn() && resource.data.customerId == uid();
+    }
+
+    // Stock-adjustment ledger — direct catalogue write (tech-arch §6.0), admin
+    // authored from the Adjust Stock screen. Append-only: no edits/deletes.
+    match /stockAdjustments/{id} {
+      allow read: if canView('inventory');
+      // Same gate as the stock mutation it records (adminAdjustStock enforces
+      // requireModule(req,'inventory','edit')). isAdmin() alone let any
+      // sub-admin forge permanent shrinkage rows into the audit trail.
+      allow create: if can('inventory', 'edit')
+        && request.resource.data.adminUid == uid()
+        && request.resource.data.productId is string
+        && request.resource.data.before is number
+        && request.resource.data.delta is number
+        && request.resource.data.after is number;
+      allow update, delete: if false;
+    }
+
+    // Broadcast notifications — admin reads the sent log; the FCM fan-out +
+    // per-user inbox writes are done by adminSendBroadcastNotification (CF-only).
+    match /broadcasts/{id} { allow read: if canView('notifications'); allow write: if false; }
+
+    // ========== Compliance / audit (admin read, CF write) ==========
+    match /complianceLogs/{id} { allow read: if isSuperAdmin(); allow write: if false; }
+    // The audit trail names who did what to whose money; it is a super-admin
+    // artefact, and no sub-admin screen reads it.
+    match /auditLogs/{id}      { allow read: if isSuperAdmin(); allow write: if false; }
+    // Policy/terms version history lives behind the Settings module.
+    match /documentVersions/{docType}/versions/{v} {
+      allow read: if canView('settings'); allow write: if false;
+    }
+
+    // ========== Server-only ==========
+    // OTP sign-in sessions: reqId, attempt counters and the resend clock. A
+    // client that could read these could enumerate live sessions, and one that
+    // could write them could reset its own attempt cap.
+    match /otpSessions/{sessionId}  { allow read, write: if false; }
+    // Per-phone hourly SMS quota. Client-writable would be no quota at all.
+    match /otpQuotas/{phone}        { allow read, write: if false; }
+    match /pendingPayments/{nonce}  { allow read, write: if false; }
+    match /idempotencyKeys/{nonce}  { allow read, write: if false; }
+    match /counters/{id}            { allow read, write: if false; }
+
+    // ========== Default deny ==========
+    match /{document=**} { allow read, write: if false; }
+  }
+}

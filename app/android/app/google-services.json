@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "250143652149",
+    "project_id": "barkath-25607",
+    "storage_bucket": "barkath-25607.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:250143652149:android:1ac4e2e98aa3e94b09f47c",
+        "android_client_info": {
+          "package_name": "app.barkath.barkath_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA3CYQuznf5qJPAlj2k9fpEH2riGNGO-lk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
