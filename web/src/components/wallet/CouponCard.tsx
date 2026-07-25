@@ -2,7 +2,7 @@
 import type { UserCoupon } from '@barkath/shared';
 import { cn } from '@/lib/cn';
 import { Button } from '@/components/ui/Button';
-import { couponDisplayStatus, couponHeadline, couponSourceLabel, formatDay } from './actions';
+import { couponDisplayStatus, couponHeadline, couponSourceLabel, couponUsageLabel, formatDay } from './actions';
 
 /**
  * A dashed-border coupon ticket (prototype §coupons / §couponWallet).
@@ -20,6 +20,7 @@ export function CouponCard({
   const status = couponDisplayStatus(coupon);
   const active = status === 'active';
   const freeShip = coupon.discountType === 'free_shipping';
+  const usageLabel = couponUsageLabel(coupon);
 
   // A friendly countdown for active coupons — "Ends today / tomorrow / in N days"
   // — so the customer sees urgency, with the exact date alongside it.
@@ -36,12 +37,27 @@ export function CouponCard({
   return (
     <div
       className={cn(
-        'flex items-center gap-4 rounded-xl border border-dashed p-[18px]',
+        'relative flex items-center gap-4 rounded-xl border border-dashed p-[18px]',
         active
           ? 'border-brand-gold-border bg-brand-gold-subtle'
           : 'border-border-default opacity-60',
       )}
     >
+      {/* "0/2" — how many of the per-customer allowance are spent. Only shown
+          when the coupon actually has a limit (couponUsageLabel is null for
+          an unlimited promotional coupon). */}
+      {usageLabel && (
+        <span
+          className={cn(
+            'absolute right-2.5 top-2.5 rounded-pill border px-2 py-0.5 font-ui text-[11px] font-extrabold',
+            active
+              ? 'border-brand-gold-border bg-white text-brand-gold-strong'
+              : 'border-border-default bg-white text-text-tertiary',
+          )}
+        >
+          {usageLabel}
+        </span>
+      )}
       <div
         className={cn(
           'flex-none font-display text-[22px] font-extrabold leading-none tracking-tight',

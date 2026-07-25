@@ -11,8 +11,9 @@ import {
   updateDoc,
 } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { httpsCallable } from 'firebase/functions';
 import type { FlashSale, FlashSaleStatus, Visibility } from '@barkath/shared';
-import { db, storage } from '@/lib/firebase';
+import { db, storage, functions } from '@/lib/firebase';
 import { deleteStorageFolder } from '@/lib/storage';
 import { useLiveCollection } from '@/hooks/firestoreCache';
 
@@ -64,6 +65,10 @@ export interface FlashSaleFormValues {
   endsAt: Date;
   bannerImageUrl: string | null;
   productIds: string[];
+  /** The sale's product list as loaded from the server, before this edit's
+   *  changes — lets `saveFlashSale` tell "removed from this sale" apart from
+   *  "never was in it". Empty for a new sale. */
+  previousProductIds: string[];
   visibility: Visibility;
   /** Set only by the "Cancel this sale" action; every other save recomputes
    *  scheduled/active/ended from the dates so the panel never has to wait for
@@ -112,7 +117,45 @@ export async function saveFlashSale(values: FlashSaleFormValues, isNew: boolean)
   } else {
     await updateDoc(doc(db, 'flashSales', values.id), base);
   }
+
+  await syncProductFlashFlags(values.id, values.productIds, values.previousProductIds);
   return values.id;
+}
+
+/**
+ * Keep each product's own `isFlashSale` flag in step with campaign membership,
+ * via the `adminSyncFlashSaleProducts` callable — NOT a direct client write.
+ * `products` writes need `canWrite('products')` in the rules, so a sub-admin
+ * granted only `flashSale.edit` would have a direct batch write denied here
+ * (exactly the bug `adminFanOutCategoryTint` exists to avoid for categories).
+ * The callable runs with admin credentials instead.
+ *
+ * Two independent things both call themselves "flash sale" — the per-product
+ * toggle on the product form (a standalone opt-in the storefront falls back to
+ * when no campaign is configured) and this campaign's `productIds`. Without
+ * this, a product added ONLY here would show in the campaign's countdown rail
+ * on web (which reads `productIds` directly) but never in the app (which has
+ * no notion of campaigns and reads `isFlashSale` alone) — and worse, it could
+ * still show up in New Arrivals, since that exclusion is also keyed on
+ * `isFlashSale`, breaking the "never both" rule the storefront relies on.
+ *
+ * Scope is deliberately narrow: newly-added products are flagged true; a
+ * product REMOVED from the list in this same edit is flagged false. A sale
+ * that simply runs its course (ends/cancelled) does NOT auto-clear the flag —
+ * that would risk silently switching off a flag an admin set independently of
+ * any campaign. Turning it off after a sale ends is a deliberate follow-up
+ * action (the per-product toggle, or removing it here before saving).
+ */
+async function syncProductFlashFlags(
+  saleId: string,
+  productIds: string[],
+  previousProductIds: string[],
+): Promise<void> {
+  const added = productIds.filter((id) => !previousProductIds.includes(id));
+  const removed = previousProductIds.filter((id) => !productIds.includes(id));
+  if (added.length === 0 && removed.length === 0) return;
+
+  await httpsCallable(functions, 'adminSyncFlashSaleProducts')({ saleId, added, removed });
 }
 
 /** Upload a flash-sale banner image to Storage under `flashSales/{id}/…`. */

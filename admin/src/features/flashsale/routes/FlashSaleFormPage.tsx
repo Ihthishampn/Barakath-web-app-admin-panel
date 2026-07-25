@@ -70,6 +70,9 @@ export function FlashSaleFormPage() {
   const [end, setEnd] = useState(toLocalInput(seed?.endsAt?.toDate?.() ?? defaultEnd(seedStart)));
   const [visible, setVisible] = useState((seed?.visibility ?? 'visible') === 'visible');
   const [productIds, setProductIds] = useState<string[]>(seed?.productIds ?? []);
+  // The list as last known from the server — lets onSave tell "removed from
+  // this sale" apart from "never was in it" (see syncProductFlashFlags).
+  const [originalProductIds, setOriginalProductIds] = useState<string[]>(seed?.productIds ?? []);
   const [bannerImageUrl, setBannerImageUrl] = useState(seed?.bannerImageUrl ?? '');
   const [cancelled, setCancelled] = useState(seed?.status === 'cancelled');
   const [errors, setErrors] = useState<{ name?: string; window?: string }>({});
@@ -103,6 +106,9 @@ export function FlashSaleFormPage() {
           setBannerImageUrl(s.bannerImageUrl ?? '');
           setCancelled(s.status === 'cancelled');
         }
+        // Always refresh the "known from server" baseline, seed or not — this
+        // is what onSave diffs against, and it must reflect the real doc.
+        setOriginalProductIds(s.productIds ?? []);
       })
       .catch(() => {
         toast.error("Couldn't load this flash sale.");
@@ -167,6 +173,7 @@ export function FlashSaleFormPage() {
       endsAt: endDate!,
       bannerImageUrl: bannerImageUrl || null,
       productIds,
+      previousProductIds: originalProductIds,
       visibility: visible ? 'visible' : 'hidden',
       cancelled,
     };

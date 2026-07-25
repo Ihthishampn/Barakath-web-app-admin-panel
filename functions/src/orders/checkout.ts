@@ -971,6 +971,14 @@ export const placeOrder = onCall(callableOpts, async (req) => {
     const spinRewardPaise =
       appliedUserCouponId && userCouponSource === 'spin' ? summary.discountPaise : 0;
 
+    // Admin campaign-coupon savings realised at checkout feed the wallet
+    // "Cashback" tally — the discount a promo coupon (created in the admin panel
+    // > Coupons) took off this order, recorded as cashback value earned. A
+    // spin-issued user coupon feeds Rewards instead (above), so the two earning
+    // paths never overlap. Taken from the SUMMARY, so it can never claim more
+    // than the order actually got.
+    const couponCashbackPaise = redeemPromo ? summary.discountPaise : 0;
+
     // Split the wallet payment by what funded it. CASHBACK IS SPENT FIRST:
     // "Refund their amount only. Cashback or discounted amount never returns to
     // wallet." Spending the prize first means the customer keeps the benefit of
@@ -1096,6 +1104,13 @@ export const placeOrder = onCall(callableOpts, async (req) => {
     }
     if (spinRewardPaise > 0) {
       custUpdate['wallet.breakdown.rewardsPaise'] = FieldValue.increment(spinRewardPaise);
+      custUpdate['wallet.lastTransactionAt'] = FieldValue.serverTimestamp();
+    }
+    if (couponCashbackPaise > 0) {
+      // Accumulate the lifetime cashback tally on the customer doc, in step with
+      // the 'cashback' ledger row written below (the Cashback tile sums the
+      // ledger; this keeps the stored breakdown coherent for anything reading it).
+      custUpdate['wallet.breakdown.cashbackPaise'] = FieldValue.increment(couponCashbackPaise);
       custUpdate['wallet.lastTransactionAt'] = FieldValue.serverTimestamp();
     }
     custUpdate['stats.ordersCount'] = FieldValue.increment(1);
@@ -1368,6 +1383,21 @@ export const placeOrder = onCall(callableOpts, async (req) => {
         balanceAfterPaise: Math.max(0, walletBalance - summary.walletUsedPaise),
         title: `Spin reward · saved on ${shortId}`, description: couponLabel || null,
         orderId: orderRef.id, orderShortId: shortId, refType: 'coupon', refId: appliedUserCouponId,
+        createdAt: now,
+      });
+    }
+
+    // Admin campaign-coupon cashback realised — log a ledger row so it shows in
+    // the wallet Cashback tile (which sums 'cashback' credits) and the
+    // transaction history. Records cashback *value* saved, not a balance
+    // movement, so balanceAfterPaise is unchanged by it. Mirrors the spin row.
+    if (couponCashbackPaise > 0) {
+      const cashbackRef = db.collection(`customers/${uid}/walletTransactions`).doc();
+      tx.set(cashbackRef, {
+        id: cashbackRef.id, type: 'credit', source: 'cashback', amountPaise: couponCashbackPaise,
+        balanceAfterPaise: Math.max(0, walletBalance - summary.walletUsedPaise),
+        title: `Cashback · saved on ${shortId}`, description: couponLabel || null,
+        orderId: orderRef.id, orderShortId: shortId, refType: 'coupon', refId: appliedPromoId,
         createdAt: now,
       });
     }

@@ -140,6 +140,17 @@ export function couponDisplayStatus(c: Pick<UserCoupon, 'status' | 'expiresAt'>)
   return 'active';
 }
 
+/**
+ * "0/2", "1/2" — how many of this coupon's per-customer uses are spent, or
+ * null when it has no such limit (an unlimited promotional coupon has
+ * `maxUsesPerCoupon: 0` — see the Rewards page's `promoToUserCoupon`; a
+ * personal spin/welcome coupon is never unlimited). Mirrors the app's
+ * `UserCoupon.usageLabel` (app/lib/features/coupons/data/user_coupon.dart).
+ */
+export function couponUsageLabel(c: Pick<UserCoupon, 'usesCount' | 'maxUsesPerCoupon'>): string | null {
+  return c.maxUsesPerCoupon > 0 ? `${c.usesCount}/${c.maxUsesPerCoupon}` : null;
+}
+
 /** Human source label for a spent/earned coupon. */
 export function couponSourceLabel(source: UserCoupon['source']): string {
   switch (source) {

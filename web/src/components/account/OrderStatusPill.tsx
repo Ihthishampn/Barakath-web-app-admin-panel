@@ -15,9 +15,21 @@ export const TONE_PILL: Record<StatusTone, string> = {
  * Order-status pill — pill-shaped, tone per status (prototype §orders).
  * "Delivered" is rendered as an inline check + label in success colour (not a
  * filled pill), matching the prototype.
+ *
+ * `delayed` overrides an open order's label/tone to a "Delayed" chip — a
+ * past-due shipment reads as late instead of its stale in-flight status,
+ * matching the detail banner and the app's badge.
  */
-export function OrderStatusPill({ status, className }: { status: OrderStatus; className?: string }) {
-  const meta = statusMeta(status);
+export function OrderStatusPill({
+  status,
+  delayed = false,
+  className,
+}: {
+  status: OrderStatus;
+  delayed?: boolean;
+  className?: string;
+}) {
+  const meta = delayed ? { label: 'Delayed', tone: 'error' as StatusTone } : statusMeta(status);
   if (status === 'delivered') {
     return (
       <span className={cn('inline-flex items-center gap-1 font-ui text-[13px] font-bold text-success', className)}>

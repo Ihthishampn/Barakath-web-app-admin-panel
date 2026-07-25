@@ -1,5 +1,5 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { toast } from 'sonner';
@@ -48,6 +48,15 @@ export default function OrderDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { order, loading, error, notFound } = useOrder(id);
   const { data: items, loading: itemsLoading } = useOrderItems(id, order);
+
+  // Open at the top. The orders list is long, so the window is usually scrolled
+  // down when a card is tapped; because this page first renders a short skeleton
+  // (order loads async), Next's App Router scroll heuristic thinks the top is
+  // already in view and leaves the scroll where it was — landing the user near
+  // the bottom once the real content fills in. Reset it explicitly on mount.
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [id]);
 
   return (
     <AccountShell>

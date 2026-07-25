@@ -41,6 +41,25 @@ export const isOpen = (s: OrderStatus): boolean => OPEN_STATUSES.includes(s);
 export const isCancellable = (s: OrderStatus): boolean =>
   s === 'accepted' || s === 'packing' || s === 'packed';
 
+/**
+ * A delayed order: still open (not delivered, not cancelled) and its promised
+ * `expectedDeliveryDate` is already behind us. The stamp is never bumped after
+ * placement, so this is the only signal a shipment has run late.
+ *
+ * Compared at day granularity (midnight-truncated, local time) so an ETA of
+ * "today" is never prematurely flagged — a shipment is late only once its
+ * promised day has fully passed. Mirrors the app's `Order.isDelayed`.
+ */
+export function isDelayed(order: Order): boolean {
+  if (!isOpen(order.status)) return false;
+  const eta = order.expectedDeliveryDate?.toDate?.();
+  if (!eta) return false;
+  const startOfEtaDay = new Date(eta.getFullYear(), eta.getMonth(), eta.getDate()).getTime();
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  return startOfEtaDay < startOfToday;
+}
+
 /** Full-width status banner copy for the order-detail hero. */
 export function statusBanner(order: Order): { tone: StatusTone; text: string } {
   switch (order.status) {
@@ -48,6 +67,13 @@ export function statusBanner(order: Order): { tone: StatusTone; text: string } {
       return { tone: 'success', text: `Delivered${order.deliveredAt ? ` on ${fmtDate(order.deliveredAt)}` : ''}` };
     case 'cancelled':
       return { tone: 'error', text: 'This order was cancelled.' };
+  }
+  // Open order whose promised date has passed — never show a stale "arriving
+  // <past date>"; say it's running late instead, like Amazon/Flipkart do.
+  if (isDelayed(order)) {
+    return { tone: 'error', text: 'Delivery delayed · your order is taking longer than expected.' };
+  }
+  switch (order.status) {
     case 'out_for_delivery':
       return { tone: 'info', text: `Out for delivery · arriving ${fmtDate(order.expectedDeliveryDate)}` };
     case 'shipped':

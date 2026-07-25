@@ -5,7 +5,7 @@ import { RiArrowLeftLine, RiTruckLine, RiCheckLine } from '@remixicon/react';
 import type { Order, OrderStatus, OrderTimelineEntry } from '@barkath/shared';
 import { AccountShell } from '@/components/account/AccountShell';
 import { ErrorState, OrderNotFound, Skeleton } from '@/components/account/AccountStates';
-import { useOrder, useTimeline, statusMeta, fmtDateLong, fmtDateTime } from '@/components/account/orders';
+import { useOrder, useTimeline, statusMeta, fmtDateLong, fmtDateTime, isDelayed } from '@/components/account/orders';
 
 /** Canonical happy-path order flow — drives the pending/upcoming steps. */
 const FLOW: OrderStatus[] = ['accepted', 'packing', 'packed', 'shipped', 'out_for_delivery', 'delivered'];
@@ -114,6 +114,7 @@ function Tracking({
 }) {
   const delivered = order.status === 'delivered';
   const cancelled = order.status === 'cancelled';
+  const delayed = isDelayed(order);
 
   return (
     <div className="max-w-[520px]">
@@ -123,11 +124,15 @@ function Tracking({
           className="mb-6 rounded-2xl p-6 text-white"
           style={{ background: 'linear-gradient(120deg,var(--brand-primary),var(--brand-primary-dark))' }}
         >
+          {/* Past-due open order: swap the stale ETA for a delayed message
+              instead of showing "Arriving by <a date already gone>". */}
           <div className="font-ui text-xs font-medium opacity-85">
-            {delivered ? 'Delivered on' : 'Arriving by'}
+            {delivered ? 'Delivered on' : delayed ? 'Delivery delayed' : 'Arriving by'}
           </div>
           <div className="mt-1.5 font-display text-3xl font-extrabold leading-tight">
-            {fmtDateLong(delivered ? order.deliveredAt : order.expectedDeliveryDate)}
+            {delayed && !delivered
+              ? 'Taking longer than expected'
+              : fmtDateLong(delivered ? order.deliveredAt : order.expectedDeliveryDate)}
           </div>
           {order.rider?.name && !delivered && (
             <div className="mt-2.5 flex items-center gap-1.5 font-ui text-[13px] font-medium opacity-90">

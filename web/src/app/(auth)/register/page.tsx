@@ -250,10 +250,20 @@ export default function RegisterPage() {
         />
 
         {step === 'form' ? (
-          <div className="mt-1.5">
+          <div className="mt-1.5 flex flex-col gap-3">
             <Button theme="primary" size="l" block onClick={submitForm} disabled={!formOk || busy}>
               {busy ? 'Sending…' : 'Create account'}
             </Button>
+            <p className="m-0 text-center font-ui text-[11px] leading-[1.5] text-text-tertiary">
+              By continuing you agree to our{' '}
+              <Link href="/terms" className="font-bold text-brand-primary hover:underline">
+                Terms &amp; Conditions
+              </Link>{' '}
+              and{' '}
+              <Link href="/privacy" className="font-bold text-brand-primary hover:underline">
+                Privacy Policy
+              </Link>
+            </p>
           </div>
         ) : step === 'referral' ? (
           <div className="mt-1.5 flex flex-col gap-4">
@@ -335,7 +345,7 @@ function PhoneField({
   return (
     <div className="flex flex-col gap-[7px]">
       <span className="font-ui text-[13px] font-bold leading-none text-text-primary">
-        WhatsApp number
+        Number
       </span>
       <div
         className={`flex items-center gap-3 rounded-[10px] border border-border bg-surface-card px-4 py-[14px] ${
@@ -348,7 +358,7 @@ function PhoneField({
         <input
           inputMode="numeric"
           autoComplete="tel-national"
-          placeholder="98765 43210"
+          placeholder="00000 00000"
           disabled={disabled}
           value={formatPhone(value)}
           onChange={(e) => onChange(digitsOnly(e.target.value, 10))}

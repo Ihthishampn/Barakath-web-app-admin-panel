@@ -10,7 +10,7 @@ import { db, FieldValue, callableOpts } from '../_lib/admin.js';
 import { requireModule, writeAudit } from '../_lib/guards.js';
 import { notifyWithdrawalDecision } from '../notifications/events.js';
 
-function referralCode(name: string, uid: string): string {
+export function referralCode(name: string, uid: string): string {
   const first = (name.split(' ')[0] ?? 'BRK').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 6) || 'BRK';
   return `${first}-${uid.slice(0, 4).toUpperCase()}`;
 }

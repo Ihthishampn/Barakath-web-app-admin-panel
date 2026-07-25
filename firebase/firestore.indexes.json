@@ -521,6 +521,25 @@
       ]
     },
     {
+      "_comment": "Paginated product reviews (web dedicated reviews page + app reviews screen): approved reviews for one product, newest first, walked by createdAt cursor. Without this the storefront can only load the whole review set at once.",
+      "collectionGroup": "reviews",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "productId",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "status",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
       "collectionGroup": "commissions",
       "queryScope": "COLLECTION",
       "fields": [

@@ -379,8 +379,12 @@ async function seedProducts() {
       seoDescription: title,
       searchKeywords: kw,
       searchIndex: buildSearchIndex([name, title, ...kw]),
-      rating: 4 + (i % 10) / 10,
-      ratingCount: 10 + i * 3,
+      // No fabricated rating: only real, approved `reviews` docs (recomputed
+      // by functions/src/reviews/moderation.ts) may ever move these two off
+      // zero — see scripts/fix-product-ratings.ts for the prod cleanup this
+      // fixed.
+      rating: 0,
+      ratingCount: 0,
       soldCount: 100 - i * 5,
       newArrivalOrder: i < 4 ? i : null,
       bestSellerOrder: i % 4 === 0 ? i : null,

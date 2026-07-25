@@ -164,6 +164,19 @@ export default function SignInPage() {
               {sending ? 'Sending…' : 'Send OTP'}
             </Button>
           )}
+
+          {step === 'phone' && (
+            <p className="m-0 text-center font-ui text-[11px] leading-[1.5] text-text-tertiary">
+              By continuing you agree to our{' '}
+              <Link href="/terms" className="font-bold text-brand-primary hover:underline">
+                Terms &amp; Conditions
+              </Link>{' '}
+              and{' '}
+              <Link href="/privacy" className="font-bold text-brand-primary hover:underline">
+                Privacy Policy
+              </Link>
+            </p>
+          )}
         </div>
 
         {step === 'code' && (
@@ -261,7 +274,7 @@ function PhoneEntry({
             ref={inputRef}
             inputMode="numeric"
             autoComplete="tel-national"
-            placeholder="98765 43210"
+            placeholder="00000 00000"
             value={formatPhone(value)}
             onChange={(e) => onChange(digitsOnly(e.target.value, 10))}
             onKeyDown={(e) => e.key === 'Enter' && onEnter()}

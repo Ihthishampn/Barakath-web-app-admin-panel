@@ -62,6 +62,10 @@ export default function CheckoutPage() {
   const reserveStartedRef = useRef(false);
   /** Once placeOrder succeeds the reservation is consumed — never release it. */
   const orderPlacedRef = useRef(false);
+  /** True only once the whole flow (order + payment) has succeeded and we're
+   *  navigating to /checkout/success — distinct from orderPlacedRef, which is
+   *  also true while a razorpay payment retry is still pending on this page. */
+  const orderSucceededRef = useRef(false);
 
   useEffect(() => {
     hydrate();
@@ -271,6 +275,7 @@ export default function CheckoutPage() {
       // fresh key, and the server — seeing no replay — placed a SECOND order.
       nonceRef.current = null;
       draft.set({ placed: { shortId: res.shortId, amountPaise: res.amountPaise, arrivesBy: null } });
+      orderSucceededRef.current = true;
       clear();
       router.push('/checkout/success');
     } catch (e) {
@@ -299,6 +304,13 @@ export default function CheckoutPage() {
       </div>
     );
   }
+
+  {/* clear() empties `lines` right before router.push, and this page stays
+      mounted until the /checkout/success RSC payload arrives — without this
+      guard that window renders the empty-bag fallback in place, which reads
+      as "navigated to Bag" even though it never did. Show the same skeleton
+      used while the page is loading instead. */}
+  if (orderSucceededRef.current) return <CheckoutSkeleton />;
 
   if (lines.length === 0) {
     return (

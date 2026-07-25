@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import { formatMoney2dp as money, type Order } from '@barkath/shared';
 import { OrderStatusPill } from './OrderStatusPill';
 import { Thumb } from './AccountStates';
-import { fmtDate, fmtDateLong, isOpen, reorder } from './orders';
+import { fmtDate, fmtDateLong, isDelayed, isOpen, reorder } from './orders';
 
 /**
  * Order summary card — the row used on the account dashboard and order history
@@ -27,11 +27,15 @@ export function OrderCard({ order }: { order: Order }) {
     isOpen(order.status) &&
     (order.paymentStatus === 'pending' || order.paymentStatus === 'failed');
 
+  // A past-due open order never shows a stale "arriving <past date>" — the
+  // delayed line replaces it (see isDelayed / statusBanner).
   const subline = delivered
     ? `${countLabel} · delivered ${fmtDate(order.deliveredAt)}`
     : cancelled
       ? `${countLabel} · order cancelled`
-      : `${countLabel} · arriving ${fmtDateLong(order.expectedDeliveryDate)}`;
+      : isDelayed(order)
+        ? `${countLabel} · delivery delayed`
+        : `${countLabel} · arriving ${fmtDateLong(order.expectedDeliveryDate)}`;
 
   return (
     <div
@@ -41,7 +45,7 @@ export function OrderCard({ order }: { order: Order }) {
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-3">
           <span className="font-ui text-[15px] font-bold text-text-primary">{order.shortId}</span>
-          <OrderStatusPill status={order.status} />
+          <OrderStatusPill status={order.status} delayed={isDelayed(order)} />
           {unpaid && (
             <span className="inline-flex items-center rounded-pill bg-error-subtle px-2.5 py-1 font-ui text-[11px] font-extrabold text-error">
               {order.paymentStatus === 'failed' ? 'Payment failed' : 'Payment pending'}

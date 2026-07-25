@@ -420,4 +420,97 @@ void main() {
     ], subtotal: 100000, facts: facts(usage: {'A': 1}));
     expect(offers.map((o) => o.code).toList(), ['OK', 'LOCKED', 'USED']);
   });
+
+  // ── My Coupons: cart-independent status + visibility for promo coupons ──
+  // The bug this locks down: an admin-created coupon applied fine at
+  // checkout but never appeared on the My Coupons screen, and nothing ever
+  // showed one as "Used" once its personal allowance was spent.
+  group('promoPersonalStatus / promoVisibleToCustomer', () {
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    test('fresh, broadly-targeted, unused coupon is active and visible', () {
+      final c = promo(maxUsesPerUser: 1);
+      expect(promoPersonalStatus(c, facts(), now), 'active');
+      expect(promoVisibleToCustomer(c, facts(), now), isTrue);
+    });
+
+    test('per-user allowance spent is used, and stays visible', () {
+      final c = promo(id: 'A', maxUsesPerUser: 1);
+      final f = facts(usage: {'A': 1});
+      expect(promoPersonalStatus(c, f, now), 'used');
+      expect(promoVisibleToCustomer(c, f, now), isTrue);
+    });
+
+    test('multi-use coupon: partial use stays active, full use is used', () {
+      final c = promo(id: 'A', maxUsesPerUser: 3);
+      expect(promoPersonalStatus(c, facts(usage: {'A': 1}), now), 'active');
+      expect(promoPersonalStatus(c, facts(usage: {'A': 3}), now), 'used');
+    });
+
+    test('unlimited per-user (maxUsesPerUser: 0) never reads as used', () {
+      final c = promo(id: 'A', maxUsesPerUser: 0);
+      expect(promoPersonalStatus(c, facts(usage: {'A': 50}), now), 'active');
+    });
+
+    test('expired, never used, is expired and hidden', () {
+      final c = promo(validUntil: Timestamp.fromDate(
+          DateTime.now().subtract(const Duration(days: 1))));
+      expect(promoPersonalStatus(c, facts(), now), 'expired');
+      expect(promoVisibleToCustomer(c, facts(), now), isFalse);
+    });
+
+    test('expired but already used stays visible as Used (used wins)', () {
+      final c = promo(
+          id: 'A',
+          maxUsesPerUser: 1,
+          validUntil: Timestamp.fromDate(
+              DateTime.now().subtract(const Duration(days: 1))));
+      final f = facts(usage: {'A': 1});
+      expect(promoPersonalStatus(c, f, now), 'used');
+      expect(promoVisibleToCustomer(c, f, now), isTrue);
+    });
+
+    test('paused (active:false), never used, is hidden', () {
+      final c = promo(active: false, status: 'paused');
+      expect(promoPersonalStatus(c, facts(), now), 'expired');
+      expect(promoVisibleToCustomer(c, facts(), now), isFalse);
+    });
+
+    test('scheduled (validFrom in the future), never used, is hidden', () {
+      final c = promo(validFrom: inDays(1));
+      expect(promoVisibleToCustomer(c, facts(), now), isFalse);
+    });
+
+    test('globally exhausted (maxUsesTotal reached) is hidden', () {
+      final c = promo(maxUsesTotal: 100, usesCount: 100);
+      expect(promoVisibleToCustomer(c, facts(), now), isFalse);
+    });
+
+    test("targetUsers 'existing': hidden for a new customer, visible for a "
+        'returning one', () {
+      final c = promo(targetUsers: 'existing');
+      expect(promoVisibleToCustomer(c, facts(ordersCount: 0), now), isFalse);
+      expect(promoVisibleToCustomer(c, facts(ordersCount: 3), now), isTrue);
+    });
+
+    test("targetUsers 'new' is visible regardless of order history", () {
+      final c = promo(targetUsers: 'new');
+      expect(promoVisibleToCustomer(c, facts(ordersCount: 5), now), isTrue);
+    });
+
+    test("targetUsers 'affiliates': hidden unless affiliate-enabled", () {
+      final c = promo(targetUsers: 'affiliates');
+      expect(
+          promoVisibleToCustomer(c, facts(affiliateEnabled: false), now),
+          isFalse);
+      expect(
+          promoVisibleToCustomer(c, facts(affiliateEnabled: true), now),
+          isTrue);
+    });
+
+    test('no validUntil (no expiry) is active indefinitely', () {
+      final c = promo();
+      expect(promoPersonalStatus(c, facts(), now), 'active');
+    });
+  });
 }

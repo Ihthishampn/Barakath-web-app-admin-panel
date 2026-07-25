@@ -89,6 +89,17 @@ function WalletBody() {
   const balancePaise = wallet?.balancePaise ?? 0;
   const breakdown = wallet?.breakdown;
 
+  // Rewards and Cashback are summed straight from the ledger by `source`, so
+  // each box shows exactly one earning path and nothing else:
+  //   Rewards  = Spin Wheel winnings        → source 'spin_reward'
+  //   Cashback = admin coupon-campaign bonus → source 'cashback'
+  // (The precomputed wallet.breakdown tallies cross-fed these two — spin wins
+  // landed under cashback — so we derive them from the real credits instead.)
+  const sumCredits = (source: WalletTransaction['source']): number =>
+    txns.reduce((n, t) => (t.type === 'credit' && t.source === source ? n + t.amountPaise : n), 0);
+  const rewardsPaise = sumCredits('spin_reward');
+  const cashbackPaise = sumCredits('cashback');
+
   async function submitTopUp() {
     const rupees = Number(amount);
     if (!Number.isFinite(rupees) || rupees <= 0) {
@@ -198,8 +209,8 @@ function WalletBody() {
         <div className="grid grid-cols-3 gap-4">
           {[
             { label: 'Refunds', value: breakdown?.refundsPaise ?? 0 },
-            { label: 'Rewards', value: breakdown?.rewardsPaise ?? 0 },
-            { label: 'Cashback', value: breakdown?.cashbackPaise ?? 0 },
+            { label: 'Rewards', value: rewardsPaise },
+            { label: 'Cashback', value: cashbackPaise },
           ].map((b) => (
             <div key={b.label} className="rounded-[14px] border border-border-subtle bg-surface-card p-[18px]">
               <div className="font-ui text-xs font-medium text-text-tertiary">{b.label}</div>

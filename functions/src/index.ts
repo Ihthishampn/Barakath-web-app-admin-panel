@@ -23,6 +23,7 @@ export { adminAdjustStock } from './catalog/inventory.js';
 // Cross-collection fan-out: editing a category rewrites its products, which a
 // categories-only sub-admin is not allowed to do from the client.
 export { adminFanOutCategoryTint } from './catalog/categoryTint.js';
+export { adminSyncFlashSaleProducts } from './catalog/flashSaleProducts.js';
 
 // Operations callables (critical: state machine / money / cross-user).
 export { adminChangeOrderStatus } from './orders/status.js';
@@ -39,6 +40,9 @@ export { topUpWallet, verifyTopUp, getTopUpStatus } from './wallet/topup.js';
 export { adminAdjustWallet } from './wallet/adjust.js';
 export { requestWithdrawal } from './affiliate/requests.js';
 export { linkReferral } from './affiliate/referral.js';
+// Default-on affiliate: provisions an enabled affiliate block for every new
+// customer at doc-create (Firestore trigger).
+export { provisionAffiliateOnSignup } from './affiliate/provision.js';
 export { executeSpin } from './spin/execute.js';
 export { adminGrantSpins } from './spin/grant.js';
 export { requestReturnOrReplacement } from './returns/requests.js';

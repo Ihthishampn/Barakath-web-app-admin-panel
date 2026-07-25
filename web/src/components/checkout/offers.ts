@@ -135,6 +135,56 @@ function promoBlockedReason(c: PromoCoupon, facts: CustomerOfferFacts | null | u
 }
 
 /**
+ * Cart-independent "My Coupons" status for a promotional coupon — 'active'
+ * (redeemable now), 'used' (this customer's personal allowance is spent) or
+ * 'expired' (no longer reachable at all: paused, wrong audience, outside its
+ * validity window, or globally exhausted). Matches the vocabulary
+ * `UserCoupon.status` already uses (@barkath/shared), so
+ * `couponDisplayStatus` (components/wallet/actions.ts) needs no changes to
+ * display it.
+ *
+ * Deliberately has no cart/subtotal/category args — the Rewards page lists a
+ * coupon regardless of what's in the bag right now; `minCartValuePaise` is
+ * shown as informational text there, not a gate, same as a personal coupon's.
+ */
+export function promoPersonalStatus(
+  c: PromoCoupon,
+  facts: CustomerOfferFacts | null | undefined,
+  now: number,
+): 'active' | 'used' | 'expired' {
+  const perUser = Number(c.maxUsesPerUser ?? 0);
+  const used = Math.max(0, Number(facts?.promoUsage?.[c.id ?? ''] ?? 0));
+  if (perUser > 0 && used >= perUser) return 'used';
+
+  if (c.status && c.status !== 'active') return 'expired';
+  if (c.active === false) return 'expired';
+  if (!audienceAllows(c.targetUsers, facts)) return 'expired';
+  const from = c.validFrom?.toMillis?.();
+  if (from && from > now) return 'expired';
+  const until = c.validUntil?.toMillis?.();
+  if (until && until < now) return 'expired';
+  const maxTotal = c.maxUsesTotal == null ? null : Number(c.maxUsesTotal);
+  if (maxTotal !== null && Math.max(0, Number(c.usesCount ?? 0)) >= maxTotal) return 'expired';
+  return 'active';
+}
+
+/**
+ * Does this promotional coupon belong on the Rewards page at all for this
+ * customer — either they can redeem it right now, or they already have (in
+ * which case it stays visible as a historical "Used" ticket even after the
+ * admin pauses it, it expires, or its audience no longer includes them).
+ */
+export function promoVisibleToCustomer(
+  c: PromoCoupon,
+  facts: CustomerOfferFacts | null | undefined,
+  now: number,
+): boolean {
+  const used = Math.max(0, Number(facts?.promoUsage?.[c.id ?? ''] ?? 0));
+  if (used > 0) return true;
+  return promoPersonalStatus(c, facts, now) === 'active';
+}
+
+/**
  * Subtotal of the lines a coupon may actually discount — mirrors
  * `discountableSubtotal` in functions/src/orders/checkout.ts, which restricts
  * both the discount and the coupon's validity to `applicableCategories`.

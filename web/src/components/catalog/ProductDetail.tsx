@@ -2,14 +2,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { doc, getDoc, collection, query, where } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 import { toast } from 'sonner';
 import {
   RiAddLine,
   RiSubtractLine,
   RiHeartLine,
   RiHeartFill,
-  RiStarFill,
   RiStarLine,
   RiInformationLine,
   RiArrowLeftLine,
@@ -20,19 +19,19 @@ import {
   discountPercent,
   type Product,
   type ProductVariant,
-  type Review,
   type SettingsDelivery,
 } from '@barkath/shared';
 import { db } from '@/lib/firebase';
 import { addToCartError, useCart } from '@/lib/cart';
 import { useAuth } from '@/lib/auth';
-import { useCollection } from '@/lib/useCollection';
 import { useCategories, useCategoryProducts, useProductsByIds } from '@/lib/catalog';
+import { usePaginatedReviews, REVIEW_PREVIEW_COUNT } from '@/lib/reviews';
 import { useDeliverySettings } from '@/lib/siteSettings';
 import { useIsWishlisted, toggleWishlist } from '@/lib/wishlist';
 import { Button } from '@/components/ui/Button';
 import { ProductGrid } from '@/components/product/ProductGrid';
-import { useMyProductReviews, reviewStatusClass, reviewStatusLabel } from '@/components/reviews/ReviewForm';
+import { useMyProductReviews } from '@/components/reviews/ReviewForm';
+import { PublicReviewCard, OwnReviewCard } from '@/components/reviews/ReviewCards';
 import { lineStock } from '@/components/catalog/stock';
 import { cn } from '@/lib/cn';
 
@@ -512,10 +511,10 @@ function RelatedProducts({ categorySlug, excludeId }: { categorySlug: string; ex
  */
 function ReviewsSection({ productId, rating, ratingCount }: { productId: string; rating: number; ratingCount: number }) {
   const customer = useAuth((s) => s.customer);
-  const { data: reviews, loading } = useCollection<Review>(
-    () => query(collection(db, 'reviews'), where('productId', '==', productId), where('status', '==', 'approved')),
-    [productId],
-  );
+  // Preview only: the first few approved reviews via a cursor-paged query, so
+  // the product page never pulls the whole review set. The full, incrementally
+  // paginated list lives on the dedicated /product/[id]/reviews page.
+  const { reviews, loading, hasMore } = usePaginatedReviews(productId, REVIEW_PREVIEW_COUNT);
 
   // The signed-in customer's OWN reviews for this product — ANY status, so one
   // submitted from an order is visible to its author here immediately (with a
@@ -526,6 +525,8 @@ function ReviewsSection({ productId, rating, ratingCount }: { productId: string;
   // in the public list.
   const myIds = new Set(myReviews.map((r) => r.id));
   const othersApproved = reviews.filter((r) => !myIds.has(r.id));
+  // More approved reviews exist than this preview shows.
+  const seeAll = hasMore || othersApproved.length >= REVIEW_PREVIEW_COUNT;
 
   return (
     <section className="border-t border-border-subtle py-10">
@@ -539,6 +540,14 @@ function ReviewsSection({ productId, rating, ratingCount }: { productId: string;
             </span>
           )}
         </div>
+        {seeAll && (
+          <Link
+            href={`/product/${productId}/reviews`}
+            className="flex-none font-ui text-[14px] font-bold text-brand-primary hover:underline"
+          >
+            See all
+          </Link>
+        )}
       </div>
 
       {/* The author's own reviews first, each with a status badge, so a review
@@ -547,23 +556,7 @@ function ReviewsSection({ productId, rating, ratingCount }: { productId: string;
       {myReviews.length > 0 && (
         <div className="mb-4 grid gap-4 sm:grid-cols-2">
           {myReviews.map((r) => (
-            <article key={r.id} className="rounded-2xl border border-brand-gold-border bg-brand-gold-subtle/40 p-5">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="font-ui text-[14px] font-bold text-text-primary">You</span>
-                <span className="inline-flex items-center gap-0.5">
-                  {Array.from({ length: 5 }).map((_, i) => (
-                    <RiStarFill key={i} size={13} className={i < Math.round(r.rating) ? 'text-brand-gold' : 'text-neutral-300'} />
-                  ))}
-                </span>
-              </div>
-              {r.title && <div className="mb-1 font-ui text-[14px] font-bold text-text-primary">{r.title}</div>}
-              {r.body && <p className="font-ui text-[14px] leading-relaxed text-text-secondary">{r.body}</p>}
-              <span
-                className={`mt-3 inline-flex items-center gap-1 rounded-pill px-2.5 py-1 font-ui text-[11px] font-bold ${reviewStatusClass(r.status)}`}
-              >
-                {reviewStatusLabel(r.status)}
-              </span>
-            </article>
+            <OwnReviewCard key={r.id} review={r} />
           ))}
         </div>
       )}
@@ -584,27 +577,8 @@ function ReviewsSection({ productId, rating, ratingCount }: { productId: string;
         ) : null
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">
-          {othersApproved.map((r) => (
-            <article key={r.id} className="rounded-2xl border border-border-subtle bg-surface-card p-5">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="font-ui text-[14px] font-bold text-text-primary">{r.customerName || 'Verified buyer'}</span>
-                <span className="inline-flex items-center gap-0.5">
-                  {Array.from({ length: 5 }).map((_, i) => (
-                    <RiStarFill key={i} size={13} className={i < Math.round(r.rating) ? 'text-brand-gold' : 'text-neutral-300'} />
-                  ))}
-                </span>
-              </div>
-              {r.title && <div className="mb-1 font-ui text-[14px] font-bold text-text-primary">{r.title}</div>}
-              {r.body && <p className="font-ui text-[14px] leading-relaxed text-text-secondary">{r.body}</p>}
-              {r.photoUrls?.length > 0 && (
-                <div className="mt-3 flex gap-2">
-                  {r.photoUrls.slice(0, 4).map((u, i) => (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img key={i} src={u} alt="" className="h-14 w-14 rounded-lg object-cover" />
-                  ))}
-                </div>
-              )}
-            </article>
+          {othersApproved.slice(0, REVIEW_PREVIEW_COUNT).map((r) => (
+            <PublicReviewCard key={r.id} review={r} />
           ))}
         </div>
       )}

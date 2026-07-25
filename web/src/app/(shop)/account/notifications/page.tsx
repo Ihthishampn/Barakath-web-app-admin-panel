@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useRef } from 'react';
 import Link from 'next/link';
-import { collection, doc, orderBy, query, writeBatch } from 'firebase/firestore';
+import { collection, doc, orderBy, query, serverTimestamp, updateDoc, writeBatch } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import {
   RiTruckLine, RiGiftLine, RiCheckLine, RiWalletLine, RiUserHeartLine,
@@ -78,6 +78,37 @@ function reportBroadcastOpens(ids: string[]): void {
   }
 }
 
+/** Firestore batches cap at 500 writes — chunked so a >500-unread inbox
+ *  doesn't fail atomically and leave everything unread. Mirrors the Flutter
+ *  app's `notifications_repository.dart` `markAllRead`. */
+const MARK_READ_CHUNK = 400;
+
+function markAllRead(uid: string, unread: InboxNotification[]): void {
+  if (unread.length === 0) return;
+  for (let i = 0; i < unread.length; i += MARK_READ_CHUNK) {
+    const batch = writeBatch(db);
+    unread
+      .slice(i, i + MARK_READ_CHUNK)
+      .forEach((n) => batch.update(doc(db, 'customers', uid, 'notifications', n.id), { read: true, readAt: serverTimestamp() }));
+    batch.commit().catch(() => {});
+  }
+  reportBroadcastOpens([...new Set(unread.map(broadcastIdOf).filter((id): id is string => !!id))]);
+}
+
+/** Single-row mark-read, fired on tap — mirrors the app's `markRead` on `_onTap`. */
+function markOneRead(uid: string, n: InboxNotification): void {
+  if (n.read) return;
+  updateDoc(doc(db, 'customers', uid, 'notifications', n.id), { read: true, readAt: serverTimestamp() }).catch(() => {});
+  reportBroadcastOpens(broadcastIdOf(n) ? [broadcastIdOf(n) as string] : []);
+}
+
+/** Calendar-day bucketing against local "now" — same two buckets as the app's
+ *  `_list` (`notifications_screen.dart`): everything from today, then everything
+ *  older in one "Earlier" group. */
+function isToday(d: Date, now: Date): boolean {
+  return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+}
+
 /** Compact relative time: "2h", "1d", "3w". */
 function timeAgo(d: Date): string {
   const s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
@@ -109,22 +140,18 @@ function NotificationsBody() {
   );
 
   // Mark unread notifications as read when the user leaves the page (so the
-  // highlight is visible while viewing, then clears for the next visit).
+  // highlight is visible while viewing, then clears for the next visit) — same
+  // "mirror the web on leave" contract the app's `dispose()` documents.
   const unreadRef = useRef<InboxNotification[]>([]);
   unreadRef.current = data.filter((n) => !n.read);
   useEffect(() => {
-    return () => {
-      const unread = unreadRef.current;
-      if (unread.length === 0) return;
-      const batch = writeBatch(db);
-      unread.forEach((n) => batch.update(doc(db, 'customers', uid, 'notifications', n.id), { read: true }));
-      batch.commit().catch(() => {});
-      // Report the opens in the same pass that consumes the unread flag.
-      reportBroadcastOpens([
-        ...new Set(unread.map(broadcastIdOf).filter((id): id is string => !!id)),
-      ]);
-    };
+    return () => markAllRead(uid, unreadRef.current);
   }, [uid]);
+
+  const unreadCount = unreadRef.current.length;
+  const now = new Date();
+  const today = data.filter((n) => n.createdAt?.toDate && isToday(n.createdAt.toDate(), now));
+  const earlier = data.filter((n) => !(n.createdAt?.toDate && isToday(n.createdAt.toDate(), now)));
 
   if (loading) {
     return (
@@ -163,57 +190,98 @@ function NotificationsBody() {
     );
   }
 
-  return (
-    <div className="max-w-[720px] overflow-hidden rounded-2xl border border-border-subtle bg-surface-card">
-      {data.map((n) => {
-        const Icon = iconFor(n);
-        const unread = !n.read;
-        const dest = destinationOf(n);
-        // Unchanged row markup — only the element wrapping it varies, so a
-        // navigable row looks and measures exactly like an inert one.
-        const cls = `flex gap-3.5 border-b border-border-subtle px-5 py-4 last:border-b-0 ${unread ? 'bg-brand-primary-subtle' : ''}`;
-        const body = (
-          <>
-            <span className="flex h-10 w-10 flex-none items-center justify-center rounded-full bg-surface-app text-brand-primary">
-              <Icon size={18} />
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="font-ui text-[14px] font-bold leading-[1.3] text-text-primary">{n.title}</div>
-              <div className="mt-0.5 font-ui text-[13px] font-medium leading-[1.4] text-text-secondary">{n.body}</div>
-            </div>
-            <span className="flex-none font-ui text-[12px] font-medium text-text-tertiary">
-              {n.createdAt?.toDate ? timeAgo(n.createdAt.toDate()) : ''}
-            </span>
-          </>
-        );
+  function renderRow(n: InboxNotification) {
+    const Icon = iconFor(n);
+    const unread = !n.read;
+    const dest = destinationOf(n);
+    // Unchanged row layout — only the element wrapping it (and the read/unread
+    // tint) varies, so a navigable row looks and measures exactly like an
+    // inert one.
+    const cls = `relative flex gap-3.5 border-b border-border-subtle px-5 py-4 last:border-b-0 ${unread ? 'bg-brand-primary-subtle' : ''}`;
+    const body = (
+      <>
+        {/* Unread: solid brand fill + white icon. Read: subtle fill + brand
+            icon. Mirrors the app's `AppNotification.palette` treatment. */}
+        <span
+          className={`flex h-10 w-10 flex-none items-center justify-center rounded-full ${
+            unread ? 'bg-brand-primary text-white' : 'bg-surface-app text-brand-primary'
+          }`}
+        >
+          <Icon size={18} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="font-ui text-[14px] font-bold leading-[1.3] text-text-primary">{n.title}</div>
+          <div className="mt-0.5 font-ui text-[13px] font-medium leading-[1.4] text-text-secondary">{n.body}</div>
+        </div>
+        <span className="flex-none font-ui text-[12px] font-medium text-text-tertiary">
+          {n.createdAt?.toDate ? timeAgo(n.createdAt.toDate()) : ''}
+        </span>
+        {/* Unread dot — same indicator the app draws on its notification cards. */}
+        {unread && <span className="absolute right-3 top-3 h-2 w-2 rounded-full bg-brand-primary" />}
+      </>
+    );
+    // Immediate single-row mark-read on tap, same as the app's `_onTap` —
+    // in addition to (not instead of) the mark-all-on-leave sweep above.
+    const onClick = () => markOneRead(uid, n);
 
-        // No deep link (or one this build cannot resolve) → the row stays a
-        // plain, non-navigable <div>, exactly as before.
-        if (!dest) {
-          return (
-            <div key={n.id} className={cls}>
-              {body}
-            </div>
-          );
-        }
-        // A "Custom URL" broadcast leaves the site — new tab, and never with
-        // an opener handle on our window.
-        if (dest.external) {
-          return (
-            <a key={n.id} href={dest.href} target="_blank" rel="noopener noreferrer" className={cls}>
-              {body}
-            </a>
-          );
-        }
-        // In-site: navigating unmounts this page, which is what flushes the
-        // read receipts (see the cleanup effect above) — the same "tap marks
-        // it read" behaviour the app has.
-        return (
-          <Link key={n.id} href={dest.href} className={cls}>
-            {body}
-          </Link>
-        );
-      })}
+    // No deep link (or one this build cannot resolve) → the row stays a
+    // plain, non-navigable <div>, but tapping it still marks it read.
+    if (!dest) {
+      return (
+        <div key={n.id} onClick={onClick} className={`${cls} cursor-pointer`}>
+          {body}
+        </div>
+      );
+    }
+    // A "Custom URL" broadcast leaves the site — new tab, and never with
+    // an opener handle on our window.
+    if (dest.external) {
+      return (
+        <a key={n.id} href={dest.href} target="_blank" rel="noopener noreferrer" onClick={onClick} className={cls}>
+          {body}
+        </a>
+      );
+    }
+    // In-site: navigating unmounts this page, which flushes any remaining
+    // read receipts (see the cleanup effect above) — but this row is marked
+    // the instant it's tapped, same timing as the app.
+    return (
+      <Link key={n.id} href={dest.href} onClick={onClick} className={cls}>
+        {body}
+      </Link>
+    );
+  }
+
+  return (
+    <div className="max-w-[720px]">
+      <div className="mb-3 flex justify-end">
+        <button
+          type="button"
+          onClick={() => markAllRead(uid, unreadRef.current)}
+          disabled={unreadCount === 0}
+          className={`font-ui text-[13px] font-bold ${
+            unreadCount > 0 ? 'text-brand-primary hover:underline' : 'cursor-default text-text-tertiary'
+          }`}
+        >
+          Mark all read
+        </button>
+      </div>
+      <div className="overflow-hidden rounded-2xl border border-border-subtle bg-surface-card">
+        {/* Two buckets, same as the app's Today/Earlier split — everything
+            from the local calendar day, then everything older in one group. */}
+        {today.length > 0 && (
+          <div className="border-b border-border-subtle px-5 pb-1.5 pt-4 font-ui text-[11px] font-extrabold uppercase tracking-wide text-text-tertiary">
+            Today
+          </div>
+        )}
+        {today.map(renderRow)}
+        {earlier.length > 0 && (
+          <div className="border-b border-border-subtle px-5 pb-1.5 pt-4 font-ui text-[11px] font-extrabold uppercase tracking-wide text-text-tertiary">
+            Earlier
+          </div>
+        )}
+        {earlier.map(renderRow)}
+      </div>
     </div>
   );
 }

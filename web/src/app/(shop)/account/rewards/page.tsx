@@ -1,10 +1,10 @@
 'use client';
 import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { collection, orderBy, query, where } from 'firebase/firestore';
+import { collection, orderBy, query, Timestamp, where } from 'firebase/firestore';
 import { RiGiftLine } from '@remixicon/react';
 import { toast } from 'sonner';
-import type { SpinCampaign, SpinSlice, UserCoupon, UserCouponStatus } from '@barkath/shared';
+import type { DiscountType, SpinCampaign, SpinSlice, UserCoupon, UserCouponStatus } from '@barkath/shared';
 import { useAuth } from '@/lib/auth';
 import { useCollection } from '@/lib/useCollection';
 import { db } from '@/lib/firebase';
@@ -15,7 +15,74 @@ import { SpinWheel } from '@/components/wallet/SpinWheel';
 import { AccountShell } from '@/components/account/AccountShell';
 import { useCart } from '@/lib/cart';
 import { callApplyCoupon, useCheckoutDraft } from '@/components/checkout/checkout';
+import { useOfferCollection } from '@/components/checkout/CouponRewardBanner';
+import {
+  promoPersonalStatus,
+  promoVisibleToCustomer,
+  type CustomerOfferFacts,
+  type PromoCoupon,
+} from '@/components/checkout/offers';
 import { WALLET_CF_MSG, callExecuteSpin, couponDisplayStatus, type SpinResult } from '@/components/wallet/actions';
+
+/**
+ * A promotional `coupons` doc carries display fields (`title`, `description`,
+ * `createdAt`) the cart-pricing `PromoCoupon` type doesn't declare (it only
+ * needs pricing/eligibility fields) — widen locally rather than widen that
+ * shared type for a field only this page reads.
+ */
+interface PromoCouponDoc extends PromoCoupon {
+  title?: string;
+  description?: string;
+  createdAt?: { toMillis?: () => number } | null;
+}
+
+/**
+ * Views a promotional (admin-created) coupon as a "My Coupons" ticket for
+ * THIS customer — mirrors the app's `UserCoupon.fromPromo`
+ * (app/lib/features/coupons/data/user_coupon.dart). [status] is pre-resolved
+ * (`promoPersonalStatus`) so this stays a pure shape-mapper.
+ */
+function promoToUserCoupon(
+  c: PromoCouponDoc,
+  status: UserCouponStatus,
+  personalUses: number,
+  lastUsedAt: Timestamp | null,
+  lastOrderId: string | null,
+): UserCoupon {
+  const issuedAtMs = c.validFrom?.toMillis?.() ?? c.createdAt?.toMillis?.() ?? Date.now();
+  const validUntilMs = c.validUntil?.toMillis?.();
+  return {
+    id: c.id ?? c.code,
+    code: c.code,
+    title: c.title ?? '',
+    description: c.description ?? '',
+    discountType: (c.discountType as DiscountType) ?? 'flat',
+    discountValuePaise: c.discountValuePaise ?? null,
+    discountPercent: c.discountPercent ?? null,
+    discountMaxCapPaise: c.discountMaxCapPaise ?? null,
+    minCartValuePaise: c.minCartValuePaise ?? 0,
+    source: 'promo',
+    campaignId: null,
+    spinHistoryId: null,
+    status,
+    issuedAt: Timestamp.fromMillis(issuedAtMs),
+    // `expiresAt` is typed non-null, but a "no expiry" promo coupon has none —
+    // every display site (CouponCard's `endsInLabel`, `couponDisplayStatus`)
+    // already optional-chains `?.toMillis?.()`, so `null` here is safe.
+    expiresAt: (validUntilMs != null ? Timestamp.fromMillis(validUntilMs) : null) as unknown as Timestamp,
+    usedAt: lastUsedAt,
+    usedOnOrderId: lastOrderId,
+    usedOnOrderShortId: null,
+    // 0 = unlimited (the admin's `maxUsesPerUser` convention — unlike a
+    // personal coupon's `maxUsesPerCoupon`, which is never 0), so the
+    // "0/2"-style badge (CouponCard's usageLabel) knows to hide itself.
+    maxUsesPerCoupon: Math.max(0, Number(c.maxUsesPerUser ?? 0)),
+    usesCount: Math.max(0, personalUses),
+    isNew: false,
+    createdAt: Timestamp.fromMillis(issuedAtMs),
+    updatedAt: Timestamp.fromMillis(issuedAtMs),
+  };
+}
 
 /** Must match SpinWheel's CSS `transition` duration (SPIN_TRANSITION, 3.4s). */
 const SPIN_SETTLE_MS = 3400;
@@ -102,10 +169,55 @@ export default function RewardsPage() {
     return Math.max(0, perDay - usedToday) + granted;
   }, [campaign, spinHistory.data, customer?.spinsRemaining]);
 
-  const { data: allCoupons, loading: couponsLoading } = useCollection<UserCoupon>(
+  const { data: personalCoupons, loading: personalLoading } = useCollection<UserCoupon>(
     () => (uid ? query(collection(db, 'customers', uid, 'coupons'), orderBy('issuedAt', 'desc')) : null),
     [uid],
   );
+
+  // Every admin-created promotional coupon (no status filter — one this
+  // customer already redeemed must still show as Used even after the admin
+  // pauses it or it expires), plus this customer's own redemption counters
+  // for it. Mirrors the app's `OffersRepository.allPromoCoupons` +
+  // `customerFacts` (app/lib/features/checkout/data/offers.dart).
+  const promoDocs = useOfferCollection<PromoCouponDoc>(() => query(collection(db, 'coupons')), []);
+  const couponUsageDocs = useOfferCollection<{
+    id: string;
+    count?: number;
+    lastUsedAt?: Timestamp | null;
+    lastOrderId?: string | null;
+  }>(() => (uid ? query(collection(db, 'customers', uid, 'couponUsage')) : null), [uid]);
+
+  const offerFacts = useMemo<CustomerOfferFacts>(
+    () => ({
+      ordersCount: Number(customer?.stats?.ordersCount ?? 0),
+      affiliateEnabled: customer?.affiliate?.enabled === true,
+      promoUsage: Object.fromEntries(couponUsageDocs.data.map((d) => [d.id, Math.max(0, Number(d.count ?? 0))])),
+    }),
+    [customer?.stats?.ordersCount, customer?.affiliate?.enabled, couponUsageDocs.data],
+  );
+
+  const visiblePromoCoupons = useMemo<UserCoupon[]>(() => {
+    const now = Date.now();
+    const lastUsedById = new Map(couponUsageDocs.data.map((d) => [d.id, d]));
+    return promoDocs.data
+      .filter((c) => promoVisibleToCustomer(c, offerFacts, now))
+      .map((c) => {
+        const usage = lastUsedById.get(c.id ?? '');
+        return promoToUserCoupon(
+          c,
+          promoPersonalStatus(c, offerFacts, now),
+          Math.max(0, Number(usage?.count ?? 0)),
+          usage?.lastUsedAt ?? null,
+          usage?.lastOrderId ?? null,
+        );
+      });
+  }, [promoDocs.data, offerFacts]);
+
+  const allCoupons = useMemo<UserCoupon[]>(
+    () => [...personalCoupons, ...visiblePromoCoupons],
+    [personalCoupons, visiblePromoCoupons],
+  );
+  const couponsLoading = personalLoading || promoDocs.loading;
 
   const [tab, setTab] = useState<UserCouponStatus>('active');
   const [code, setCode] = useState('');

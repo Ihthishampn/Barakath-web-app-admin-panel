@@ -97,7 +97,7 @@ function useCartPricesReady(): boolean {
  * A null query (signed out) simply never settles: nothing is rendered then, and
  * every effect is short-circuited on the uid anyway.
  */
-function useOfferCollection<T>(makeQuery: () => Query | null, deps: unknown[]): { data: T[]; loading: boolean } {
+export function useOfferCollection<T>(makeQuery: () => Query | null, deps: unknown[]): { data: T[]; loading: boolean } {
   const [state, setState] = useState<{ data: T[]; loading: boolean }>({ data: [], loading: true });
   useEffect(() => {
     const q = makeQuery();
