@@ -44,6 +44,14 @@
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="barakath_default" />
+        <!-- Same reasoning for the tray icon: without this, a notification
+             delivered while the app is backgrounded/killed (rendered by FCM
+             itself, not PushMessageService) falls back to the app's launcher
+             icon implicitly, which is fine, but naming it explicitly here
+             matches Firebase's own guidance and keeps this in one place. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@mipmap/ic_launcher" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

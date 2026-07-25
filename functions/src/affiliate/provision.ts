@@ -20,7 +20,7 @@
  */
 import { onDocumentCreated } from 'firebase-functions/v2/firestore';
 import { db, FieldValue, REGION } from '../_lib/admin.js';
-import { referralCode, normaliseCommissionRate } from './withdrawals.js';
+import { referralCode } from './withdrawals.js';
 
 /**
  * A referral code no other customer already holds. `resolveReferralCode`
@@ -55,8 +55,6 @@ export const provisionAffiliateOnSignup = onDocumentCreated(
     if (snap.get('affiliate') != null) return;
 
     const uid = event.params.uid;
-    const settings = await db.doc('settings/affiliate').get();
-    const rate = normaliseCommissionRate(Number(settings.get('defaultCommissionRate') ?? 0.05));
     const code = await uniqueReferralCode(String(snap.get('name') ?? ''), uid);
     const now = FieldValue.serverTimestamp();
 
@@ -64,12 +62,12 @@ export const provisionAffiliateOnSignup = onDocumentCreated(
     // be in flight — writing the whole block at once is safe here (unlike the
     // by-field-path discipline the admin allocate/accrual writers must keep).
     // `role` stays 'customer': every gate keys on affiliate.enabled, not role.
+    // No commission rate: commission is per-product now.
     await snap.ref.update({
       affiliate: {
         enabled: true,
         enabledAt: now,
         referralCode: code,
-        commissionRate: rate,
         pendingBalancePaise: 0,
         confirmedBalancePaise: 0,
         withdrawnBalancePaise: 0,

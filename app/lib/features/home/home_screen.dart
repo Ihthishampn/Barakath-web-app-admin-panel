@@ -71,7 +71,15 @@ class _HomeScreenState extends State<HomeScreen> {
                             products: flash,
                             // "See all" stays flash-sale only, mirroring the
                             // rail it's attached to.
-                            source: 'flash'),
+                            source: 'flash',
+                            // Countdown in the heading: admin sale end time when
+                            // one is scheduled (same for everyone), else a demo
+                            // 2h30m loop — see _CountdownPill.
+                            badge: StreamBuilder<DateTime?>(
+                              stream: _repo.activeFlashSaleEndsAt(),
+                              builder: (context, s) =>
+                                  _CountdownPill(endsAt: s.data),
+                            )),
                       const SizedBox(height: AppSpacing.x24),
                       // Always shown, mirroring the web home page: the header
                       // and "See all" (→ the full catalogue) never disappear,
@@ -344,26 +352,34 @@ class _BannersState extends State<_Banners> {
 // ── Section header ──────────────────────────────────────────────────
 class _SectionHeader extends StatelessWidget {
   const _SectionHeader(
-      {required this.title, required this.source, this.listTitle});
+      {required this.title, required this.source, this.listTitle, this.badge});
   final String title;
   final String source; // 'all' | 'flash' | 'arrivals'
 
   /// Title for the pushed listing when it differs from the rail's own heading
   /// (Flash sale's "See all" opens the whole catalogue, not just the rail).
   final String? listTitle;
+
+  /// Optional pill shown right after the title (the Flash sale countdown).
+  final Widget? badge;
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: AppSpacing.x20),
       child: Row(
         children: [
-          Expanded(
+          Flexible(
             child: Text(title,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: AppType.headingLarge
                     .copyWith(fontSize: 18, fontWeight: FontWeight.w800)),
           ),
+          if (badge != null) ...[
+            const SizedBox(width: AppSpacing.x10),
+            badge!,
+          ],
+          const Spacer(),
           const SizedBox(width: AppSpacing.x12),
           GestureDetector(
             onTap: () => context.push(Routes.productList,
@@ -383,16 +399,20 @@ class _SectionHeader extends StatelessWidget {
 // ── Horizontal rail (Flash sale) ────────────────────────────────────
 class _Rail extends StatelessWidget {
   const _Rail(
-      {required this.title, required this.products, required this.source});
+      {required this.title,
+      required this.products,
+      required this.source,
+      this.badge});
   final String title;
   final List<Product> products;
   final String source;
+  final Widget? badge;
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _SectionHeader(title: title, source: source),
+        _SectionHeader(title: title, source: source, badge: badge),
         const SizedBox(height: AppSpacing.x12),
         SizedBox(
           height: 250,
@@ -466,6 +486,97 @@ class _Grid extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+// ── Flash sale countdown pill ───────────────────────────────────────
+/// The `02 : 14 : 09` pill in the Flash sale heading.
+///
+/// PRODUCTION: pass the admin sale's [endsAt] — every device counts down to the
+/// same instant, and at 00:00:00 the sale is over (the rail clears once the
+/// products lose their flash flag / the sale ends).
+///
+/// DEMO ([endsAt] null — no admin schedule yet): start from 2h30m, and whenever
+/// it reaches zero reset back to 2h30m and keep going, so the heading always has
+/// a live timer. Restarts from 2h30m every time the screen is (re)built, i.e.
+/// on reopening the app. A stand-in until flash sales are admin-scheduled.
+class _CountdownPill extends StatefulWidget {
+  const _CountdownPill({this.endsAt});
+  final DateTime? endsAt;
+
+  @override
+  State<_CountdownPill> createState() => _CountdownPillState();
+}
+
+class _CountdownPillState extends State<_CountdownPill> {
+  static const _demoWindow = Duration(hours: 2, minutes: 30);
+  Timer? _timer;
+  late DateTime _target;
+  late Duration _remaining;
+
+  bool get _demo => widget.endsAt == null;
+
+  @override
+  void initState() {
+    super.initState();
+    _resetTarget();
+    _remaining = _computeRemaining();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
+  }
+
+  @override
+  void didUpdateWidget(covariant _CountdownPill old) {
+    super.didUpdateWidget(old);
+    // The admin sale end time arrived (or changed) — recount to it.
+    if (old.endsAt != widget.endsAt) {
+      _resetTarget();
+      setState(() => _remaining = _computeRemaining());
+    }
+  }
+
+  void _resetTarget() =>
+      _target = _demo ? DateTime.now().add(_demoWindow) : widget.endsAt!;
+
+  Duration _computeRemaining() {
+    final rem = _target.difference(DateTime.now());
+    return rem.isNegative ? Duration.zero : rem;
+  }
+
+  void _tick() {
+    var rem = _computeRemaining();
+    // Demo mode loops; a real sale simply holds at 00:00:00 (it has ended).
+    if (rem == Duration.zero && _demo) {
+      _resetTarget();
+      rem = _demoWindow;
+    }
+    if (mounted) setState(() => _remaining = rem);
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    final h = two(_remaining.inHours);
+    final m = two(_remaining.inMinutes % 60);
+    final s = two(_remaining.inSeconds % 60);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppColors.statusErrorRed,
+        borderRadius: BorderRadius.circular(AppRadii.control),
+      ),
+      child: Text('$h : $m : $s',
+          style: AppType.bodySmall.copyWith(
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.4,
+              color: Colors.white)),
     );
   }
 }

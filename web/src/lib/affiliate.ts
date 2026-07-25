@@ -63,31 +63,6 @@ export function normaliseReferralCode(raw: string | null | undefined): string {
   return (raw ?? '').trim().toUpperCase();
 }
 
-/**
- * Affiliate presentation helpers.
- *
- * Commission rates are stored as a FRACTION (0.05 = 5%) — the Cloud Functions
- * normalise on write (`functions/src/affiliate/commissions.ts` normaliseRate),
- * but legacy docs written before that may still hold a whole percent (5). We
- * mirror the server's `> 1 ? n / 100 : n` rule so both forms display the same.
- */
-
-/** Stored rate (fraction, or a legacy whole percent) → fraction. */
-export function normaliseCommissionRate(raw: number | null | undefined): number {
-  const n = Number(raw ?? 0);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  return n > 1 ? n / 100 : n;
-}
-
-/**
- * Stored rate → the number to render before a "%" sign.
- * Rounded to 2dp so 0.025 reads "2.5" and floating-point noise
- * (0.05 * 100 = 5.000000000000001) never reaches the UI.
- */
-export function commissionRatePercent(raw: number | null | undefined): string {
-  const pct = normaliseCommissionRate(raw) * 100;
-  return String(Math.round(pct * 100) / 100);
-}
 
 /**
  * Withdrawal processing fee, mirroring `requestWithdrawal`

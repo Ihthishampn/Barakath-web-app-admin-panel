@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { toast } from 'sonner';
-import { RiArrowLeftLine, RiCloseLine, RiErrorWarningLine } from '@remixicon/react';
+import { RiArrowLeftLine, RiCloseLine, RiErrorWarningLine, RiHistoryLine } from '@remixicon/react';
 import { formatMoneyInt, type OrderRequest } from '@barkath/shared';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/StatusBadge';
@@ -36,6 +36,17 @@ const TABS: { key: ReturnTab; label: string }[] = [
 
 const PAGE = 10;
 
+/** The decision entry (approved/rejected) — last in the array since decisions.ts appends via arrayUnion. */
+function latestHistoryEntry(r: OrderRequest) {
+  const hist = Array.isArray(r.statusHistory) ? r.statusHistory : [];
+  return hist.length > 0 ? hist[hist.length - 1] : null;
+}
+
+/** What the admin recorded with the decision — a rejection reason, or an approval note (e.g. manual payout). */
+function decisionNote(r: OrderRequest): string | null {
+  return latestHistoryEntry(r)?.note ?? r.rejectionReason ?? null;
+}
+
 export function ReturnsListPage() {
   const { data: requests, loading, error } = useReturnsList();
   // Customer names are a nicety here (the request carries the uid), but
@@ -54,6 +65,10 @@ export function ReturnsListPage() {
   const [review, setReview] = useState<OrderRequest | null>(null);
   const [approve, setApprove] = useState<OrderRequest | null>(null);
   const [reject, setReject] = useState<OrderRequest | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  // Whether the open review drawer was reached from the history list — so its
+  // back arrow returns there instead of just closing.
+  const [reviewFromHistory, setReviewFromHistory] = useState(false);
   // Both adminApproveOrderRequest and adminRejectOrderRequest call
   // requireModule(req, 'refunds', 'approve') — one permission, both decisions.
   const canDecide = useCanDo('refunds', 'approve');
@@ -71,6 +86,18 @@ export function ReturnsListPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requests, tab, query, nameByUid]);
   const pageRows = paginate(rows, page, PAGE);
+
+  // Every decided request (approved or rejected), newest decision first — the
+  // two tabs above already split these, but a reviewer looking for "what did
+  // we decide and why" across both wants one combined activity log instead of
+  // flipping tabs and opening each row for its note.
+  const historyRows = useMemo(
+    () =>
+      requests
+        .filter((r) => returnTabOf(r.status) !== 'pending')
+        .sort((a, b) => (latestHistoryEntry(b)?.at?.toMillis?.() ?? 0) - (latestHistoryEntry(a)?.at?.toMillis?.() ?? 0)),
+    [requests],
+  );
 
   // Keep the open review drawer in sync with live data (status flips after an action).
   const liveReview = review ? requests.find((r) => r.id === review.id) ?? review : null;
@@ -120,7 +147,12 @@ export function ReturnsListPage() {
             {counts.pending} pending · {counts.approved} approved · {counts.rejected} rejected
           </p>
         </div>
-        <Button variant="primary" className="h-[42px]" onClick={onExport}>Export</Button>
+        <div className="flex items-center gap-2.5">
+          <Button variant="outline" className="h-[42px]" onClick={() => setShowHistory(true)}>
+            <RiHistoryLine size={16} /> View history
+          </Button>
+          <Button variant="primary" className="h-[42px]" onClick={onExport}>Export</Button>
+        </div>
       </div>
 
       {/* Read error — surfaced instead of a misleading empty state */}
@@ -189,7 +221,10 @@ export function ReturnsListPage() {
               pageRows.map((r) => (
                 <tr
                   key={r.id}
-                  onClick={() => setReview(r)}
+                  onClick={() => {
+                    setReviewFromHistory(false);
+                    setReview(r);
+                  }}
                   className="cursor-pointer hover:bg-surface-app"
                 >
                   <td className="whitespace-nowrap border-b border-border-subtle px-4 py-3 font-ui text-[13px] font-bold text-text-primary">{r.shortId}</td>
@@ -235,6 +270,21 @@ export function ReturnsListPage() {
 
       {rows.length > 0 && <Pagination page={page} total={rows.length} pageSize={PAGE} onPage={setPage} noun="requests" />}
 
+      {/* History drawer — every decided (approved/rejected) request, newest first */}
+      {showHistory && (
+        <HistoryDrawer
+          rows={historyRows}
+          customerName={customerName}
+          autoRefundToWallet={autoRefundToWallet}
+          onClose={() => setShowHistory(false)}
+          onSelect={(r) => {
+            setShowHistory(false);
+            setReviewFromHistory(true);
+            setReview(r);
+          }}
+        />
+      )}
+
       {/* Review drawer — full context for a decision */}
       {liveReview && (
         <ReviewDrawer
@@ -243,6 +293,14 @@ export function ReturnsListPage() {
           autoRefundToWallet={autoRefundToWallet}
           canDecide={canDecide}
           onClose={() => setReview(null)}
+          onBack={
+            reviewFromHistory
+              ? () => {
+                  setReview(null);
+                  setShowHistory(true);
+                }
+              : undefined
+          }
           onApprove={() => setApprove(liveReview)}
           onReject={() => setReject(liveReview)}
         />
@@ -299,6 +357,7 @@ function ReviewDrawer({
   autoRefundToWallet,
   canDecide,
   onClose,
+  onBack,
   onApprove,
   onReject,
 }: {
@@ -308,6 +367,8 @@ function ReviewDrawer({
   /** Caller holds `refunds.approve` — the drawer's two buttons are off without it. */
   canDecide: boolean;
   onClose: () => void;
+  /** Set only when opened from the history list — the arrow returns there instead of closing outright. */
+  onBack?: () => void;
   onApprove: () => void;
   onReject: () => void;
 }) {
@@ -326,7 +387,17 @@ function ReviewDrawer({
         <div className="flex items-center justify-between border-b border-border-subtle px-6 py-4">
           <div>
             <div className="flex items-center gap-2">
-              <RiArrowLeftLine size={16} className="text-brand-primary" />
+              {onBack ? (
+                <button
+                  onClick={onBack}
+                  title="Back to history"
+                  className="rounded-lg p-0.5 text-brand-primary hover:bg-brand-primary-subtle"
+                >
+                  <RiArrowLeftLine size={16} />
+                </button>
+              ) : (
+                <RiArrowLeftLine size={16} className="text-brand-primary" />
+              )}
               <h2 className="font-display text-lg font-extrabold text-text-primary">Return {r.shortId}</h2>
             </div>
             <p className="mt-0.5 font-ui text-[12px] text-text-tertiary">
@@ -436,6 +507,75 @@ function ReviewDrawer({
             </Button>
           </div>
         )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+// ── History drawer — every decided request, one combined activity log ──
+function HistoryDrawer({
+  rows,
+  customerName,
+  autoRefundToWallet,
+  onClose,
+  onSelect,
+}: {
+  rows: OrderRequest[];
+  customerName: (r: OrderRequest) => string;
+  autoRefundToWallet: boolean;
+  onClose: () => void;
+  onSelect: (r: OrderRequest) => void;
+}) {
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex justify-end"
+      style={{ background: 'var(--scrim)' }}
+      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div className="flex h-full w-full max-w-[520px] flex-col border-l border-border-subtle bg-surface-card shadow-lg">
+        <div className="flex items-center justify-between border-b border-border-subtle px-6 py-4">
+          <div>
+            <h2 className="font-display text-lg font-extrabold text-text-primary">Return history</h2>
+            <p className="mt-0.5 font-ui text-[12px] text-text-tertiary">Every approved or rejected request, newest first.</p>
+          </div>
+          <button onClick={onClose} className="rounded-lg p-1.5 text-text-tertiary hover:bg-surface-app hover:text-text-primary">
+            <RiCloseLine size={20} />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-6 py-5">
+          {rows.length === 0 ? (
+            <p className="py-12 text-center font-ui text-[13px] text-text-tertiary">No decided requests yet.</p>
+          ) : (
+            <div className="flex flex-col gap-2.5">
+              {rows.map((r) => {
+                const approved = returnTabOf(r.status) === 'approved';
+                const note = decisionNote(r);
+                const at = latestHistoryEntry(r)?.at;
+                return (
+                  <button
+                    key={r.id}
+                    onClick={() => onSelect(r)}
+                    className="flex flex-col items-start gap-1.5 rounded-xl border border-border-subtle p-3.5 text-left transition-colors hover:border-brand-primary"
+                  >
+                    <div className="flex w-full items-center justify-between gap-2">
+                      <span className="font-ui text-[13px] font-bold text-text-primary">
+                        {r.shortId} · {customerName(r)}
+                      </span>
+                      <Badge tone={approved ? 'success' : 'error'}>{approved ? 'Refunded' : 'Rejected'}</Badge>
+                    </div>
+                    <div className="font-ui text-[12px] text-text-secondary">
+                      Order {r.orderShortId} · {formatMoneyInt(refundAmountPaise(r))} · {plannedRefundTargetLabel(r, autoRefundToWallet)}
+                    </div>
+                    {note && <div className="font-ui text-[12px] italic text-text-tertiary">“{note}”</div>}
+                    <div className="font-ui text-[11px] text-text-tertiary">{dateTimeShort(at?.toDate?.())}</div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>,
     document.body,

@@ -73,13 +73,17 @@ export interface Product extends BaseDoc, SoftDeletable {
   hasVariants: boolean;
   variants: ProductVariant[];
   /**
-   * Referral price + flat per-unit affiliate commission for a product with NO
-   * variants (a variant carries its own pair; the admin nulls these out once
-   * variants exist). Commission accrual prefers the ordered variant's
-   * `commissionPaise`, then this, then `affiliateCommissionRate`, then the
-   * affiliate's own rate.
+   * Referral (affiliate) display price for a variant-less product. Not
+   * commission — see `commissionPaise` / `affiliateCommissionRate` below.
    */
   referralPricePaise?: number | null;
+  /**
+   * Product affiliate commission — the FIXED-AMOUNT option (per unit, ×qty at
+   * checkout). Mutually exclusive with {@link affiliateCommissionRate}: exactly
+   * one of the two is set per product, the other is null. `null` here means
+   * "not the fixed-amount path" (0 is a real "pays nothing"). Applies to every
+   * variant of the product.
+   */
   commissionPaise?: number | null;
   stock: number; // used only when hasVariants=false
   lowStockThreshold: number;
@@ -100,6 +104,11 @@ export interface Product extends BaseDoc, SoftDeletable {
   codAvailable: boolean;
 
   isAffiliateEligible: boolean;
+  /**
+   * Product affiliate commission — the PERCENTAGE option (fraction; ×line total,
+   * i.e. ×qty, at checkout). Mutually exclusive with {@link commissionPaise}:
+   * exactly one of the two is set per product, the other is null.
+   */
   affiliateCommissionRate: number | null;
 
   seoTitle: string;
@@ -107,7 +116,15 @@ export interface Product extends BaseDoc, SoftDeletable {
   searchKeywords: string[];
   searchIndex: string[];
 
+  /**
+   * Average of this product's APPROVED review ratings (one decimal). DERIVED,
+   * never entered: the `onReviewWritten` trigger
+   * (functions/src/reviews/aggregate.ts) is the sole writer, and firestore.rules
+   * locks the pair against client writes. A product with no reviews is the
+   * baseline `rating: 1.0, ratingCount: 0`, shown as "1.0 ★ · 0 Reviews".
+   */
   rating: number;
+  /** Number of APPROVED reviews behind {@link rating}. 0 for a new product. */
   ratingCount: number;
   soldCount: number;
 

@@ -118,7 +118,7 @@ async function seedSettings() {
   await set('delivery', { freeDeliveryOverPaise: inr(1499), standardFeePaise: inr(49), codSurchargePaise: inr(20), deliveryDaysMin: 2, deliveryDaysMax: 5 });
   await set('paymentGateway', { razorpayKeyId: '', codEnabled: true, codMaxAmountPaise: inr(5000), walletEnabled: true, onlinePaymentEnabled: true });
   await set('tax', { gstRate: 0.18, gstEnabled: true, gstin: '', legalName: 'Barkath Retail Pvt Ltd', businessCity: 'Bengaluru', businessCountry: 'India', pricesIncludeTax: true, hsnCodes: {} });
-  await set('affiliate', { enabled: true, defaultCommissionRate: 0.05, commissionClearanceDays: 7, minWithdrawalPaise: inr(500), maxWithdrawalPerDayPaise: inr(50000), processingFeeType: 'fixed', processingFeeValue: 0, processingFeeMinPaise: 0, shareMessage: 'Try Barkath — use my code {CODE}: barkath.com/r/{CODE}' });
+  await set('affiliate', { enabled: true, commissionClearanceDays: 7, minWithdrawalPaise: inr(500), maxWithdrawalPerDayPaise: inr(50000), processingFeeType: 'fixed', processingFeeValue: 0, processingFeeMinPaise: 0, shareMessage: 'Try Barkath — use my code {CODE}: barkath.com/r/{CODE}' });
   await set('returns', { windowDays: 7, autoRefundToWallet: true });
   await set('support', { supportEmail: 'help@barkath.app', supportPhone: '', supportHours: 'Mon–Sat 9 AM – 8 PM IST', supportEnabled: true });
   await set('announcement', { active: false, message: '', linkUrl: null, linkLabel: null, startsAt: null, endsAt: null });

@@ -200,7 +200,6 @@ async function seedSettings() {
   });
   await set('affiliate', {
     enabled: true,
-    defaultCommissionRate: 0.05,
     commissionClearanceDays: 7,
     minWithdrawalPaise: inr(500),
     maxWithdrawalPerDayPaise: inr(50000),
@@ -336,7 +335,9 @@ async function seedProducts() {
           stock: 10 - vi * 3,
           sku: `BRK-${pad(i + 1, 3)}-${sz}`,
           referralPricePaise: Math.round(offer * 0.95),
-          commissionPaise: Math.round(offer * 0.05),
+          // Commission is product-level now (see affiliateCommissionRate below);
+          // a variant never carries its own.
+          commissionPaise: null,
           weight: 300,
           visibility: 'visible',
           attributes: { size: sz.toLowerCase() },
@@ -374,16 +375,18 @@ async function seedProducts() {
       returnAvailable: true,
       codAvailable: true,
       isAffiliateEligible: true,
-      affiliateCommissionRate: null,
+      // Product-level affiliate commission — a 5% default (amount XOR percent;
+      // percent here). commissionPaise stays null (the amount option is unused).
+      affiliateCommissionRate: 0.05,
+      commissionPaise: null,
       seoTitle: name,
       seoDescription: title,
       searchKeywords: kw,
       searchIndex: buildSearchIndex([name, title, ...kw]),
-      // No fabricated rating: only real, approved `reviews` docs (recomputed
-      // by functions/src/reviews/moderation.ts) may ever move these two off
-      // zero — see scripts/fix-product-ratings.ts for the prod cleanup this
-      // fixed.
-      rating: 0,
+      // No fabricated rating: a product starts at the 1.0 / 0 baseline and only
+      // real, approved `reviews` docs (recomputed by the onReviewWritten trigger,
+      // functions/src/reviews/aggregate.ts) ever move it.
+      rating: 1,
       ratingCount: 0,
       soldCount: 100 - i * 5,
       newArrivalOrder: i < 4 ? i : null,
@@ -450,7 +453,6 @@ async function seedCustomers() {
             enabled: true,
             enabledAt: daysAgo(80),
             referralCode: c.code,
-            commissionRate: 0.05,
             pendingBalancePaise: inr(3200),
             confirmedBalancePaise: inr(9280),
             withdrawnBalancePaise: inr(4000),

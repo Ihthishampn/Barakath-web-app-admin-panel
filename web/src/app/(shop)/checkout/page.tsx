@@ -245,9 +245,17 @@ export default function CheckoutPage() {
         reservationId,
       });
       // The order exists now and the reservation is consumed with it: never
-      // release it, and never send its id again (a retry replays the nonce).
+      // release it, and never send its id again.
       orderPlacedRef.current = true;
       reservationRef.current = null;
+
+      // The items now live on the pending order, so empty the bag — they must
+      // not linger in two places. The nonce is retired here too: this page can
+      // no longer re-place an empty cart, and a failed payment is retried from
+      // My orders via "Pay now", which reuses THIS order (payForOrder) rather
+      // than placing a second one.
+      nonceRef.current = null;
+      clear();
 
       // 2) Online payment → open Razorpay for the placed order, then verify.
       //    Every failure below leaves the order standing (stock stays held) and
@@ -266,17 +274,16 @@ export default function CheckoutPage() {
           const { tone, text } = payOutcomeMessage(outcome);
           if (tone === 'error') toast.error(text);
           else toast.message(text);
+          // Saved as pending under My orders — take the customer to the order so
+          // they can Pay now (resumes this order) or cancel it. The bag is empty.
+          router.push(`/account/orders/${res.orderId}`);
           return;
         }
       }
 
-      // 3) Done. Retire the nonce only now: clearing it right after placeOrder
-      // meant a cancelled or failed Razorpay payment followed by a retry got a
-      // fresh key, and the server — seeing no replay — placed a SECOND order.
-      nonceRef.current = null;
+      // 3) Paid, or a wallet order settled outright → success screen.
       draft.set({ placed: { shortId: res.shortId, amountPaise: res.amountPaise, arrivesBy: null } });
       orderSucceededRef.current = true;
-      clear();
       router.push('/checkout/success');
     } catch (e) {
       toast.error(errMessage(e, 'Something went wrong placing your order. Please try again.'));
@@ -305,12 +312,14 @@ export default function CheckoutPage() {
     );
   }
 
-  {/* clear() empties `lines` right before router.push, and this page stays
-      mounted until the /checkout/success RSC payload arrives — without this
-      guard that window renders the empty-bag fallback in place, which reads
-      as "navigated to Bag" even though it never did. Show the same skeleton
-      used while the page is loading instead. */}
-  if (orderSucceededRef.current) return <CheckoutSkeleton />;
+  {/* clear() empties `lines` the moment placeOrder succeeds — well before
+      payForOrder opens the Razorpay sheet (script load + modal can take a
+      couple of seconds) or, on success, before the /checkout/success RSC
+      payload arrives. Without this guard that whole window renders the
+      empty-bag fallback in place, which flashes as "your bag is empty" right
+      when the customer expects the payment sheet. Show the loading skeleton
+      instead for as long as this order attempt is in flight. */}
+  if (orderPlacedRef.current || orderSucceededRef.current) return <CheckoutSkeleton />;
 
   if (lines.length === 0) {
     return (

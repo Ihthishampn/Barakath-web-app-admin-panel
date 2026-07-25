@@ -13,7 +13,7 @@ import {
   useNewArrivalProducts,
   useProductsByIds,
 } from '@/lib/catalog';
-import { useActiveFlashSale, flashSaleProducts, useCountdown } from '@/lib/flashSale';
+import { useActiveFlashSale, flashSaleProducts, useFlashSaleCountdown } from '@/lib/flashSale';
 import { useWebBanners } from '@/lib/banners';
 
 export default function HomePage() {
@@ -40,7 +40,9 @@ export default function HomePage() {
   );
   const flashLoading = flaggedLoading || campaignLoading;
 
-  const countdown = useCountdown(sale?.endsAt?.toMillis?.() ?? null);
+  // Admin sale → count to its `endsAt`; otherwise a demo 2 h 30 m loop so the
+  // heading always carries a live timer (see useFlashSaleCountdown).
+  const countdown = useFlashSaleCountdown(sale?.endsAt?.toMillis?.() ?? null);
 
   return (
     <div>
@@ -109,7 +111,8 @@ export default function HomePage() {
         title="Flash sale"
         href="/listing"
         badge={
-          countdown && !countdown.done ? (
+          // Only alongside a live rail — no timer over an empty Flash sale.
+          flash.length > 0 && countdown && !countdown.done ? (
             <span className="rounded-[6px] bg-error px-[8px] py-[4px] font-ui text-[13px] font-extrabold leading-[13px] tracking-[0.52px] text-white">
               {countdown.hours} : {countdown.minutes} : {countdown.seconds}
             </span>

@@ -262,8 +262,20 @@ GoRouter createRouter(AuthProvider auth) {
       GoRoute(
         path: Routes.payment,
         parentNavigatorKey: _rootKey,
-        builder: (_, state) =>
-            PaymentScreen(payablePaise: state.extra is int ? state.extra as int : 0),
+        // `extra` is an int (payable amount) for a fresh checkout, or a Map
+        // {orderId, shortId, payablePaise} to RESUME paying an existing unpaid
+        // order (the "Pay now" retry from My orders).
+        builder: (_, state) {
+          final extra = state.extra;
+          if (extra is Map) {
+            return PaymentScreen(
+              payablePaise: (extra['payablePaise'] as num?)?.toInt() ?? 0,
+              resumeOrderId: extra['orderId'] as String?,
+              resumeShortId: extra['shortId'] as String?,
+            );
+          }
+          return PaymentScreen(payablePaise: extra is int ? extra : 0);
+        },
       ),
       GoRoute(
         path: Routes.orderConfirmation,

@@ -161,7 +161,7 @@ export function SubAdminFormPage() {
               <input
                 value={name}
                 onChange={(e) => { setName(e.target.value); setErrors((x) => ({ ...x, name: undefined })); }}
-                placeholder="e.g. Fatima N"
+                placeholder="Name"
                 className={inputCls(!!errors.name)}
               />
             </Field>

@@ -124,7 +124,8 @@ async function main() {
       seoDescription: p.title,
       searchKeywords: kw,
       searchIndex: buildSearchIndex([p.name, p.title, ...kw]),
-      rating: 0,
+      // Review-derived rating: 1.0 / 0 baseline until real reviews arrive.
+      rating: 1,
       ratingCount: 0,
       soldCount: 0,
       newArrivalOrder: null,

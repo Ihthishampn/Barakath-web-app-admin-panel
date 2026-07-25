@@ -86,29 +86,29 @@ class ProductCard extends StatelessWidget {
                           // card keeps just the selling price for a cleaner tile.
                         ],
                       ),
-                      if (product.ratingCount > 0) ...[
-                        const SizedBox(height: 2),
-                        Row(
-                          children: [
-                            const Icon(Icons.star_rounded,
-                                size: 11, color: AppColors.brandAmber),
-                            const SizedBox(width: 3),
-                            Text(product.rating.toStringAsFixed(1),
+                      // Rating is always shown — review-derived, 1.0 ★ · (0)
+                      // baseline for a product with no reviews yet.
+                      const SizedBox(height: 2),
+                      Row(
+                        children: [
+                          const Icon(Icons.star_rounded,
+                              size: 11, color: AppColors.brandAmber),
+                          const SizedBox(width: 3),
+                          Text(product.rating.toStringAsFixed(1),
+                              style: AppType.bodySmall.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.textSecondary)),
+                          const SizedBox(width: 3),
+                          Flexible(
+                            child: Text('(${product.ratingCount})',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                                 style: AppType.bodySmall.copyWith(
-                                    fontWeight: FontWeight.w700,
-                                    color: AppColors.textSecondary)),
-                            const SizedBox(width: 3),
-                            Flexible(
-                              child: Text('(${product.ratingCount})',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: AppType.bodySmall.copyWith(
-                                      fontSize: 11,
-                                      color: AppColors.textTertiary)),
-                            ),
-                          ],
-                        ),
-                      ],
+                                    fontSize: 11,
+                                    color: AppColors.textTertiary)),
+                          ),
+                        ],
+                      ),
                     ],
                   ),
                 ),

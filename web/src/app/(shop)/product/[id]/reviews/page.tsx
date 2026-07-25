@@ -60,12 +60,11 @@ export default function ProductReviewsPage() {
 
       <div className="mb-6 flex flex-wrap items-baseline gap-3">
         <h1 className="font-display text-[26px] font-extrabold tracking-[-0.02em] text-text-primary">Reviews</h1>
-        {ratingCount > 0 && (
-          <span className="inline-flex items-center gap-1 font-ui text-[14px] font-bold text-text-secondary">
-            <RiStarLine size={15} className="text-brand-gold" />
-            {rating.toFixed(1)} · {ratingCount} rating{ratingCount === 1 ? '' : 's'}
-          </span>
-        )}
+        {/* Always shown — review-derived, 1.0 ★ · 0 ratings baseline. */}
+        <span className="inline-flex items-center gap-1 font-ui text-[14px] font-bold text-text-secondary">
+          <RiStarLine size={15} className="text-brand-gold" />
+          {rating.toFixed(1)} · {ratingCount} rating{ratingCount === 1 ? '' : 's'}
+        </span>
       </div>
 
       {product?.name && (

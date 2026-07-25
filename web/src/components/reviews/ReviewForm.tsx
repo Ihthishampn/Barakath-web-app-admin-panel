@@ -111,14 +111,16 @@ export function ReviewForm({
         title: title.trim() || null,
         body: body.trim(),
         photoUrls: [],
-        status: 'pending',
+        // Verified purchasers go live instantly — no approval queue. Moderation
+        // exists only to take an abusive review down afterwards.
+        status: 'approved',
         moderatedBy: null,
         moderatedAt: null,
         helpfulCount: 0,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
-      toast.success('Thanks! Your review is pending approval.');
+      toast.success('Thanks! Your review is now live.');
       onDone();
     } catch (e) {
       // A rules rejection is permanent (no purchases/{productId} doc, or the

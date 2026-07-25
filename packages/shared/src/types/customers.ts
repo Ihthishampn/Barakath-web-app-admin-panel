@@ -47,7 +47,9 @@ export interface AffiliateInfo {
   enabled: boolean;
   enabledAt: Ts | null;
   referralCode: string;
-  commissionRate: number;
+  // No per-affiliate commission rate any more. Commission is configured on the
+  // PRODUCT (a fixed amount or a percentage) and decides what the referrer earns
+  // per sale — see Product.commissionPaise / Product.affiliateCommissionRate.
   pendingBalancePaise: number;
   confirmedBalancePaise: number;
   withdrawnBalancePaise: number;

@@ -63,6 +63,14 @@ function useProduct(id: string): FetchState {
 export function ProductDetail({ id }: { id: string }) {
   const { product, loading, error } = useProduct(id);
 
+  // Next.js doesn't reset window scroll when navigating between two routes
+  // that match the same dynamic segment (/product/[id] -> /product/[id]), so
+  // clicking a different product from partway down a listing page lands you
+  // partway (or fully) down the new product's page instead of at the top.
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [id]);
+
   if (loading) return <DetailSkeleton />;
   if (error) return <DetailMessage title="Something went wrong" body="We couldn't load this product. Please try again." />;
   if (!product || product.status !== 'published') {
@@ -144,10 +152,11 @@ function DetailBody({ product }: { product: Product }) {
   /** The SELECTED variant is in the bag → the CTA becomes a remove toggle. */
   const inBag = inBagQty > 0;
 
-  // Affiliate economics resolve variant-first then product-level, mirroring the
-  // commission accrual order documented on Product.referralPricePaise.
+  // Referral display price resolves variant-first then product-level. Affiliate
+  // commission is PRODUCT-level now (a fixed amount OR a percentage).
   const referralPaise = variant?.referralPricePaise ?? product.referralPricePaise ?? null;
-  const commissionPaise = variant?.commissionPaise ?? product.commissionPaise ?? null;
+  const commissionPaise = product.commissionPaise ?? null;
+  const commissionPercent = product.affiliateCommissionRate ?? null;
   // Show earnings only to a customer who is actually an enrolled affiliate — an
   // ordinary shopper must never see the referral price or the per-sale cut.
   const showAffiliate =
@@ -288,12 +297,11 @@ function DetailBody({ product }: { product: Product }) {
 
         {/* info column */}
         <div className="flex min-w-0 flex-1 flex-col gap-4">
-          {product.ratingCount > 0 && (
-            <div className="inline-flex items-center gap-1 font-ui text-[13px] font-bold text-text-secondary">
-              <RiStarLine size={15} className="text-brand-gold" />
-              {product.rating.toFixed(1)} · {product.ratingCount} review{product.ratingCount === 1 ? '' : 's'}
-            </div>
-          )}
+          {/* Rating is always shown — review-derived, 1.0 ★ · 0 Reviews baseline. */}
+          <div className="inline-flex items-center gap-1 font-ui text-[13px] font-bold text-text-secondary">
+            <RiStarLine size={15} className="text-brand-gold" />
+            {product.rating.toFixed(1)} · {product.ratingCount} review{product.ratingCount === 1 ? '' : 's'}
+          </div>
 
           <h1 className="font-display text-[28px] font-extrabold leading-[1.1] tracking-[-0.02em] text-text-primary sm:text-[34px]">
             {product.displayTitle || product.name}
@@ -318,9 +326,11 @@ function DetailBody({ product }: { product: Product }) {
               </span>
               <span className="font-ui text-[13px] font-semibold leading-[1.4] text-brand-gold-strong">
                 Referral price <b className="font-extrabold">{formatMoney2dp(referralPaise!)}</b>
-                {commissionPaise != null && (
+                {commissionPaise != null ? (
                   <> · you earn <b className="font-extrabold">{formatMoney2dp(commissionPaise)}</b> per sale</>
-                )}
+                ) : commissionPercent != null && commissionPercent > 0 ? (
+                  <> · you earn <b className="font-extrabold">{Math.round(commissionPercent * 1000) / 10}%</b> per sale</>
+                ) : null}
               </span>
             </div>
           )}
@@ -533,12 +543,11 @@ function ReviewsSection({ productId, rating, ratingCount }: { productId: string;
       <div className="mb-6 flex flex-wrap items-baseline justify-between gap-3">
         <div className="flex items-baseline gap-3">
           <h2 className="font-display text-[24px] font-extrabold tracking-[-0.02em] text-text-primary">Reviews</h2>
-          {ratingCount > 0 && (
-            <span className="inline-flex items-center gap-1 font-ui text-[14px] font-bold text-text-secondary">
-              <RiStarLine size={15} className="text-brand-gold" />
-              {rating.toFixed(1)} · {ratingCount} rating{ratingCount === 1 ? '' : 's'}
-            </span>
-          )}
+          {/* Always shown — review-derived, 1.0 ★ · 0 ratings baseline. */}
+          <span className="inline-flex items-center gap-1 font-ui text-[14px] font-bold text-text-secondary">
+            <RiStarLine size={15} className="text-brand-gold" />
+            {rating.toFixed(1)} · {ratingCount} rating{ratingCount === 1 ? '' : 's'}
+          </span>
         </div>
         {seeAll && (
           <Link

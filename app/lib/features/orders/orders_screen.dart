@@ -310,6 +310,20 @@ class _OrderCardState extends State<_OrderCard> {
       return _link(_reordering ? 'Adding…' : 'Reorder',
           _reordering ? null : _reorder);
     }
+    // An unpaid order isn't trackable yet — it isn't accepted until the payment
+    // is confirmed. Offer a one-tap retry that reopens the gateway for THIS
+    // order (resume mode) instead of the Track link.
+    if (o.status.isAwaitingPayment) {
+      final due =
+          (o.totalPaise - o.walletUsedPaise).clamp(0, o.totalPaise);
+      return _link(
+          'Pay now',
+          () => context.push(Routes.payment, extra: {
+                'orderId': o.id,
+                'shortId': o.shortId,
+                'payablePaise': due,
+              }));
+    }
     // Open / trackable order.
     return _link('Track', () => context.push('${Routes.orderTracking}/${o.id}'));
   }

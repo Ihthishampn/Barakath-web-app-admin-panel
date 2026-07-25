@@ -14,7 +14,7 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { buildSearchIndex, discountPercent, type Product } from '@barkath/shared';
+import { buildSearchIndex, discountPercent, DEFAULT_PRODUCT_COMMISSION_RATE, type Product } from '@barkath/shared';
 import { db, storage } from '@/lib/firebase';
 import { deleteStorageFolder } from '@/lib/storage';
 import { useLiveCollection } from '@/hooks/firestoreCache';
@@ -83,56 +83,20 @@ function needsPublishStamp(prev: Product | null, next: Product['status']): boole
   return !(prev?.status === 'published' && prev.publishedAt != null);
 }
 
-export async function getProduct(id: string): Promise<ProductWithRatingParts | null> {
+export async function getProduct(id: string): Promise<Product | null> {
   const snap = await getDoc(doc(db, 'products', id));
-  return snap.exists() ? (snap.data() as ProductWithRatingParts) : null;
+  return snap.exists() ? (snap.data() as Product) : null;
 }
 
 /**
- * Rating provenance carried on the product doc.
- *
- * `rating`/`ratingCount` are DERIVED and owned by nobody: they are the
- * admin-entered seed plus the approved reviews. This file owns
- * seedRating/seedRatingCount (the launch / migrated aggregate, which has no
- * review docs behind it); functions/src/reviews/moderation.ts owns
- * reviewRatingSum/reviewRatingCount. Both recompute the derived pair the same
- * way, so neither side can silently destroy the other's numbers — before this,
- * both wrote `rating` directly and whichever wrote last won.
- *
- * The four fields aren't on the shared `Product` type, so they are read through
- * this view.
+ * A product's `rating`/`ratingCount` are DERIVED, never entered here: they are
+ * the mean and count of that product's APPROVED reviews, computed ONLY by the
+ * onReviewWritten trigger (functions/src/reviews/aggregate.ts) and locked
+ * against client writes in firestore.rules. A new product starts at the
+ * baseline 1.0 / 0. This file therefore never sets the pair except to that
+ * baseline on create — there is no admin-entered seed any more.
  */
-export interface ProductRatingParts {
-  seedRating?: number;
-  seedRatingCount?: number;
-  reviewRatingSum?: number;
-  reviewRatingCount?: number;
-}
-export type ProductWithRatingParts = Product & ProductRatingParts;
-
-/** Seed + reviews → the pair the storefronts read. Mirrors moderation.ts. */
-function combinedRating(seedRating: number, seedCount: number, reviewSum: number, reviewCount: number) {
-  const ratingCount = seedCount + reviewCount;
-  const rating =
-    ratingCount === 0 ? 0 : Math.round(((seedRating * seedCount + reviewSum) / ratingCount) * 10) / 10;
-  return { rating, ratingCount };
-}
-
-/** The rating half of a save: the seed as entered, the aggregate recomputed. */
-function ratingSeedPatch(seedRating: number, seedCount: number, prev: ProductRatingParts | null) {
-  // The review side comes off the product doc, not from a reviews query: the
-  // reviews collection is gated on its own module, and moderation keeps these
-  // two fields exact. A product last written before they existed reads 0/0 —
-  // its review contribution reappears at the next moderation, which always
-  // recomputes from the review docs themselves.
-  const reviewCount = Number(prev?.reviewRatingCount ?? 0);
-  const reviewSum = Number(prev?.reviewRatingSum ?? 0);
-  return {
-    seedRating,
-    seedRatingCount: seedCount,
-    ...combinedRating(seedRating, seedCount, reviewSum, reviewCount),
-  };
-}
+const BASELINE_RATING = { rating: 1, ratingCount: 0 } as const;
 
 /** Reserve a Firestore doc id for a new product (so images can upload pre-save). */
 export function newProductId(): string {
@@ -156,23 +120,16 @@ export interface ProductFormValues {
   isBestSeller: boolean;
   isFeatured: boolean;
   isFlashSale: boolean;
-  /**
-   * Admin-entered rating SEED — the launch / migrated social proof that has no
-   * review docs behind it. It is NOT the number the storefront shows: that is
-   * `rating`/`ratingCount`, the seed combined with the approved reviews (see
-   * `ratingSeedPatch`). Left undefined on an edit that didn't touch the fields,
-   * so an unrelated save can't revert an approval that landed meanwhile.
-   */
-  rating?: number;
-  ratingCount?: number;
-  /**
-   * Referral price + affiliate commission for a product with NO variants. A
-   * variant carries its own pair; a single-price product has no variant to hold
-   * them, and the pricing table invites the admin to fill them in on that row —
-   * so they are stored on the product doc instead of being dropped on save.
-   */
+  /** Referral (affiliate) display price for a variant-less product. */
   referralPricePaise: number | null;
+  /**
+   * Product affiliate commission — exactly one of these is set, the other null
+   * (the form's Amount|Percent toggle decides). Applies to every variant.
+   * `commissionPaise` = fixed amount per unit; `affiliateCommissionRate` =
+   * percentage as a fraction.
+   */
   commissionPaise: number | null;
+  affiliateCommissionRate: number | null;
   /**
    * HSN code printed on the GST invoice for every line of this product.
    * `null` = inherit `settings/tax.hsnCodes[categorySlug]`, which is exactly
@@ -209,10 +166,13 @@ export async function saveProduct(values: ProductFormValues, isNew: boolean): Pr
     discountPercent: discountPercent(values.mrpPaise, values.offerPricePaise),
     hasVariants,
     variants: values.variants,
-    // Single-price products keep these at the top level (see ProductFormValues);
-    // a variant product's pair lives on each variant, so null them out here.
+    // Referral display price is variant-less-only (a variant carries its own).
     referralPricePaise: hasVariants ? null : values.referralPricePaise,
-    commissionPaise: hasVariants ? null : values.commissionPaise,
+    // Affiliate commission is a PRODUCT-level setting now — a fixed amount OR a
+    // percentage, mutually exclusive (the form nulls whichever isn't chosen),
+    // applied to every variant. Written on both create and edit.
+    commissionPaise: values.commissionPaise,
+    affiliateCommissionRate: values.affiliateCommissionRate,
     specifications: values.specifications,
     fbt: values.fbt,
     searchKeywords,
@@ -237,13 +197,10 @@ export async function saveProduct(values: ProductFormValues, isNew: boolean): Pr
     await setDoc(doc(db, 'products', values.id), {
       id: values.id,
       ...base,
-      // A new product has no reviews, so the derived aggregate is just the seed.
-      // Absent (a path that doesn't pass a rating) defaults to a 2.0/1 launch
-      // seed rather than 0, so a fresh product never shows a bare "no ratings"
-      // and a real review then blends up from 2. The form passes its own value.
-      ...ratingSeedPatch(values.rating ?? 2, values.ratingCount ?? 1, null),
-      reviewRatingSum: 0,
-      reviewRatingCount: 0,
+      // Rating is review-derived and starts at the 1.0 / 0 baseline. Only the
+      // onReviewWritten trigger may move it from here (firestore.rules locks the
+      // pair against client writes; the rules also require exactly this on create).
+      ...BASELINE_RATING,
       // Stamped when first flagged; the storefront rail sorts on it ascending.
       bestSellerOrder: values.isBestSeller ? Date.now() : null,
       // New arrivals is derived from publishedAt in the storefront; keep the
@@ -258,7 +215,6 @@ export async function saveProduct(values: ProductFormValues, isNew: boolean): Pr
       returnAvailable: true,
       codAvailable: true,
       isAffiliateEligible: true,
-      affiliateCommissionRate: null,
       seoTitle: values.name,
       seoDescription: values.name,
       soldCount: 0,
@@ -278,16 +234,11 @@ export async function saveProduct(values: ProductFormValues, isNew: boolean): Pr
     const ref = doc(db, 'products', values.id);
     await runTransaction(db, async (tx) => {
       const snap = await tx.get(ref);
-      const prev = snap.exists() ? (snap.data() as ProductWithRatingParts) : null;
+      const prev = snap.exists() ? (snap.data() as Product) : null;
       const stored = prev?.variants ?? [];
-      // Rating + reviews count — only written when the caller supplied them
-      // (see ProductFormValues). What the admin typed is the SEED; the stored
-      // review side is folded back in so an edit here cannot wipe approved
-      // reviews, exactly as moderation cannot wipe the seed.
-      const ratingPatch =
-        values.rating !== undefined
-          ? ratingSeedPatch(values.rating, values.ratingCount ?? 0, prev)
-          : {};
+      // An edit never touches `rating`/`ratingCount` — they are review-derived
+      // and locked against client writes (firestore.rules); `base` deliberately
+      // omits them, so the stored pair carries through untouched.
       // Adding the first variant flips hasVariants, and every reader (storefront,
       // inventory, the list badge) stops looking at the top-level `stock` from
       // then on — carry it onto the first new variant instead of orphaning real
@@ -305,7 +256,6 @@ export async function saveProduct(values: ProductFormValues, isNew: boolean): Pr
       });
       tx.update(ref, {
         ...base,
-        ...ratingPatch,
         variants,
         ...(converting ? { stock: 0 } : {}),
         // The Best sellers rail is ordered by bestSellerOrder ASC, so re-stamping
@@ -338,6 +288,12 @@ export async function duplicateProduct(id: string): Promise<string> {
   const name = `${src.name} (Copy)`;
   const searchKeywords = [name.split(' ')[0]?.toLowerCase() ?? '', src.categoryId];
   const { id: _oldId, ...rest } = src;
+  // Old source docs may still carry the retired manual-seed provenance fields;
+  // never copy them onto a fresh product (the onReviewWritten trigger owns the
+  // rating now, and a leftover seed reads as fabricated data).
+  for (const k of ['seedRating', 'seedRatingCount', 'reviewRatingSum', 'reviewRatingCount']) {
+    delete (rest as Record<string, unknown>)[k];
+  }
   await setDoc(doc(db, 'products', newId), {
     ...rest,
     id: newId,
@@ -355,15 +311,9 @@ export async function duplicateProduct(id: string): Promise<string> {
     status: 'draft',
     searchKeywords,
     searchIndex: buildSearchIndex([name, ...searchKeywords]),
-    rating: 0,
-    ratingCount: 0,
-    // Both halves of the aggregate reset too (see ProductRatingParts) — `rest`
-    // carries them over from the source, and a seed left on a fresh product
-    // would resurrect the original's ratings at the copy's first approval.
-    seedRating: 0,
-    seedRatingCount: 0,
-    reviewRatingSum: 0,
-    reviewRatingCount: 0,
+    // A copy has no reviews of its own → the 1.0 / 0 baseline every new product
+    // starts at (the create rule requires exactly this).
+    ...BASELINE_RATING,
     soldCount: 0,
     newArrivalOrder: null,
     bestSellerOrder: null,
@@ -460,18 +410,15 @@ export async function importProducts(rows: ImportRow[]): Promise<number> {
         returnAvailable: true,
         codAvailable: true,
         isAffiliateEligible: true,
-        affiliateCommissionRate: null,
+        // Imported products get the default commission percentage so the
+        // affiliate system works out of the box (admins can change per product).
+        commissionPaise: null,
+        affiliateCommissionRate: DEFAULT_PRODUCT_COMMISSION_RATE,
         seoTitle: row.name,
         seoDescription: row.name,
-        // Same 2.0/1 launch seed as a form-created product, so an imported
-        // product also never shows a bare "no ratings" and real reviews blend
-        // up from 2 (see ratingSeedPatch / combinedRating).
-        rating: 2,
-        ratingCount: 1,
-        seedRating: 2,
-        seedRatingCount: 1,
-        reviewRatingSum: 0,
-        reviewRatingCount: 0,
+        // Rating is review-derived; an imported product starts at the 1.0 / 0
+        // baseline like any other (the create rule requires exactly this).
+        ...BASELINE_RATING,
         soldCount: 0,
         newArrivalOrder: null,
         bestSellerOrder: null,

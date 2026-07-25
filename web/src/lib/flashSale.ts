@@ -6,6 +6,13 @@ import { db } from './firebase';
 import { useCollection } from './useCollection';
 
 /**
+ * Demo-only flash-sale length, used when no admin sale is scheduled yet.
+ * 2 h 30 m, restarted on every load and looped on reaching zero — see
+ * {@link useFlashSaleCountdown}. Replace with admin-scheduled sales for prod.
+ */
+export const DEMO_FLASH_SALE_MS = (2 * 60 + 30) * 60 * 1000;
+
+/**
  * The live flash sale, if one is running.
  *
  * Index-free: filter on `status` only (a single field) and check the time
@@ -74,4 +81,39 @@ export function useCountdown(targetMs: number | null): Countdown | null {
     seconds: pad(totalSeconds % 60),
     done: remaining === 0,
   };
+}
+
+/**
+ * The Flash Sale heading countdown.
+ *
+ * PRODUCTION: pass the admin sale's `endsAt` (ms). Every visitor counts down to
+ * the same instant, and the pill reaches 00:00:00 exactly when the sale ends —
+ * at which point `useActiveFlashSale` stops returning the sale and the rail
+ * clears itself, so the products are no longer shown until a new sale starts.
+ *
+ * DEMO (no admin schedule → `endsAtMs` null): start from 2 h 30 m on mount, and
+ * when it hits zero reset back to 2 h 30 m and keep counting, so the section
+ * always shows a live timer. Per-device by design — reopening the app restarts
+ * it. Purely a stand-in until every flash sale is admin-scheduled.
+ */
+export function useFlashSaleCountdown(endsAtMs: number | null): Countdown | null {
+  const [target, setTarget] = useState<number | null>(null);
+  const demo = endsAtMs == null;
+
+  useEffect(() => {
+    // Real sale → count to its end; demo → 2 h 30 m from now (resets on reload).
+    setTarget(demo ? Date.now() + DEMO_FLASH_SALE_MS : endsAtMs);
+  }, [demo, endsAtMs]);
+
+  const countdown = useCountdown(target);
+
+  useEffect(() => {
+    // Demo loop: the moment it reaches zero, restart the 2 h 30 m window.
+    if (demo && countdown?.done) setTarget(Date.now() + DEMO_FLASH_SALE_MS);
+  }, [demo, countdown?.done]);
+
+  // While a demo reset is in flight the raw countdown is momentarily `done`;
+  // report the fresh 2 h 30 m instead so the pill never flashes 00:00:00.
+  if (demo && countdown?.done) return { hours: '02', minutes: '30', seconds: '00', done: false };
+  return countdown;
 }

@@ -4,15 +4,15 @@ int _int(dynamic v) => (v as num?)?.toInt() ?? 0;
 DateTime? _ts(dynamic v) => v is Timestamp ? v.toDate() : null;
 
 /// The affiliate block on `customers/{uid}.affiliate`. Mirrors the web/admin
-/// `AffiliateInfo` shape exactly. Balances are integer paise; [commissionRate]
-/// is a FRACTION (0.05 = 5%). Allocated by admin (`adminAllocateAffiliate`) —
-/// a customer is never an affiliate until then.
+/// `AffiliateInfo` shape exactly. Balances are integer paise. There is no
+/// per-affiliate commission rate any more — commission is configured per
+/// product. Allocated by admin (`adminAllocateAffiliate`) — a customer is never
+/// an affiliate until then.
 class AffiliateInfo {
   const AffiliateInfo({
     required this.enabled,
     required this.walletEnabled,
     required this.referralCode,
-    required this.commissionRate,
     required this.pendingBalancePaise,
     required this.confirmedBalancePaise,
     required this.withdrawnBalancePaise,
@@ -29,7 +29,6 @@ class AffiliateInfo {
   /// when this is false — read here so the client can say the same thing.
   final bool walletEnabled;
   final String referralCode;
-  final double commissionRate; // fraction
   final int pendingBalancePaise;
   final int confirmedBalancePaise; // = withdrawable
   final int withdrawnBalancePaise;
@@ -39,13 +38,6 @@ class AffiliateInfo {
 
   /// Stamped by `approveWithdrawal` when a payout is settled.
   final DateTime? lastWithdrawalPaidAt;
-
-  /// Whole-number percent for display (0.05 → 5). Tolerates a rate stored as a
-  /// percent by mistake (>1), matching web `normaliseCommissionRate`.
-  int get commissionPercent {
-    final r = commissionRate > 1 ? commissionRate / 100 : commissionRate;
-    return (r * 100).round();
-  }
 
   static AffiliateInfo? fromCustomer(Map<String, dynamic>? data) {
     final a = data?['affiliate'];
@@ -58,7 +50,6 @@ class AffiliateInfo {
       // server only blocks on an explicit `false` (see requestWithdrawal).
       walletEnabled: (m['walletEnabled'] as bool?) ?? true,
       referralCode: (m['referralCode'] as String?) ?? '',
-      commissionRate: (m['commissionRate'] as num?)?.toDouble() ?? 0,
       pendingBalancePaise: _int(m['pendingBalancePaise']),
       confirmedBalancePaise: _int(m['confirmedBalancePaise']),
       withdrawnBalancePaise: _int(m['withdrawnBalancePaise']),

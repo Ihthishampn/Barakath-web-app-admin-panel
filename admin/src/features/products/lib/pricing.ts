@@ -1,8 +1,11 @@
 /**
  * Single source of truth for the price ladder used anywhere connected money
- * fields appear (product variants, coupons, etc.). The tiers must satisfy:
+ * fields appear (product variants, etc.). The tiers must satisfy:
  *
- *   Price  ≥  Offer  ≥  Referral  ≥  Commission
+ *   Price  ≥  Offer  ≥  Referral
+ *
+ * (Affiliate commission is no longer part of the ladder — it is a separate
+ * product-level amount OR percentage, validated on its own.)
  *
  * Each field is checked against the nearest higher tier that is actually set,
  * falling back up the ladder, so partially-filled rows still validate sensibly.
@@ -14,7 +17,6 @@ export interface PriceLadder {
   price: PriceInput;
   offer: PriceInput;
   referral: PriceInput;
-  comm: PriceInput;
 }
 
 export type PriceField = keyof PriceLadder;
@@ -28,7 +30,6 @@ export function validatePriceLadder(r: PriceLadder): PriceErrors {
   const price = num(r.price);
   const offer = num(r.offer);
   const referral = num(r.referral);
-  const comm = num(r.comm);
   const errs: PriceErrors = {};
 
   if (price != null && price <= 0) errs.price = 'Price must be greater than ₹0.';
@@ -42,12 +43,6 @@ export function validatePriceLadder(r: PriceLadder): PriceErrors {
     errs.referral = `Referral can’t exceed ${offer != null ? 'Offer' : 'Price'}.`;
   }
 
-  const commCeil = referral ?? offer ?? price;
-  if (comm != null && commCeil != null && comm > commCeil) {
-    const ref = referral != null ? 'Referral' : offer != null ? 'Offer' : 'Price';
-    errs.comm = `Commission can’t exceed ${ref}.`;
-  }
-
   return errs;
 }
 
@@ -55,7 +50,7 @@ export function validatePriceLadder(r: PriceLadder): PriceErrors {
 export function firstLadderError(rows: PriceLadder[]): string | null {
   for (const r of rows) {
     const e = validatePriceLadder(r);
-    const msg = e.price ?? e.offer ?? e.referral ?? e.comm;
+    const msg = e.price ?? e.offer ?? e.referral;
     if (msg) return msg;
   }
   return null;

@@ -11,8 +11,14 @@ export const BUSINESS_TIMEZONE = 'Asia/Kolkata' as const;
 export const COUNTRY = 'India' as const;
 export const ORDER_ID_PREFIX = 'BRK' as const; // #BRK-XXXXXX
 
-// ── Order status (backend enum — 7 states, tech-arch §1.6a) ─────────
+// ── Order status (backend enum — tech-arch §1.6a) ──────────────────
+// `pending_payment` is the pre-payment state of an online (Razorpay) order: it
+// is created here at placement and only becomes 'accepted' once verifyPayment
+// confirms the capture. An order NEVER skips straight to 'accepted' on an
+// online payment, and no "Order placed" notification is sent until it does.
+// Wallet-fully-paid orders (nothing left to collect) are 'accepted' at once.
 export const ORDER_STATUSES = [
+  'pending_payment',
   'accepted',
   'packing',
   'packed',
@@ -36,6 +42,10 @@ export type AdminOrderTab = (typeof ADMIN_ORDER_TABS)[number];
 
 /** Backend status → admin tab bucket. */
 export const ORDER_STATUS_TO_ADMIN_TAB: Record<OrderStatus, Exclude<AdminOrderTab, 'all'>> = {
+  // Unpaid online orders sit in the Accepted bucket; the status badge shows
+  // "Payment pending" so they read distinctly. They are transient — either the
+  // payment confirms (→ accepted) or the abandoned-order sweep cancels them.
+  pending_payment: 'accepted',
   accepted: 'accepted',
   packing: 'accepted',
   packed: 'packed',
@@ -47,6 +57,10 @@ export const ORDER_STATUS_TO_ADMIN_TAB: Record<OrderStatus, Exclude<AdminOrderTa
 
 /** Valid forward transitions (server-enforced; no skipping, cancel from early states). */
 export const ORDER_STATUS_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
+  // An unpaid order can only be cancelled (by the abandoned-order sweep or an
+  // admin). The move to 'accepted' is done by verifyPayment on capture, which
+  // writes the status directly rather than going through this graph.
+  pending_payment: ['cancelled'],
   accepted: ['packing', 'cancelled'],
   packing: ['packed', 'cancelled'],
   packed: ['shipped', 'cancelled'],
@@ -65,8 +79,13 @@ export const ORDER_STATUS_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   cancelled: [],
 };
 
-/** What a CUSTOMER may cancel themselves — narrower than the admin graph above. */
-export const CANCELLABLE_STATUSES: OrderStatus[] = ['accepted', 'packing', 'packed'];
+/**
+ * What a CUSTOMER may cancel themselves — narrower than the admin graph above.
+ * Includes `pending_payment`: an online order placed but not yet paid can be
+ * cancelled by its owner (releasing its held stock + coupon), and stops at
+ * 'packed' — once a parcel is with the courier the customer goes through returns.
+ */
+export const CANCELLABLE_STATUSES: OrderStatus[] = ['pending_payment', 'accepted', 'packing', 'packed'];
 
 // ── Payments ───────────────────────────────────────────────────────
 /**
@@ -170,6 +189,14 @@ export type ItemReturnStatus = (typeof ITEM_RETURN_STATUSES)[number];
 // ── Affiliate ──────────────────────────────────────────────────────
 export const COMMISSION_STATUSES = ['pending', 'confirmed', 'paid', 'cancelled'] as const;
 export type CommissionStatus = (typeof COMMISSION_STATUSES)[number];
+
+/**
+ * Default affiliate commission for a product when none is set — used to prefill
+ * the admin product form and to backfill legacy products. Commission is a
+ * PER-PRODUCT setting now (a fixed amount OR this percentage); there is no
+ * per-affiliate rate. Fraction, so 0.05 = 5%.
+ */
+export const DEFAULT_PRODUCT_COMMISSION_RATE = 0.05;
 
 export const WITHDRAWAL_STATUSES = [
   'pending',

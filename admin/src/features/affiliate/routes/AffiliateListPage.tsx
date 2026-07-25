@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { createPortal } from 'react-dom';
 import { toast } from 'sonner';
+import { RiArrowDownSLine, RiArrowRightSLine } from '@remixicon/react';
 import { formatMoneyCompact, formatMoneyInt, type Customer, type WithdrawalRequest } from '@barkath/shared';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/StatusBadge';
@@ -15,6 +16,7 @@ import { matchesSearch } from '@/lib/search';
 import { useSearchStore } from '@/stores/searchStore';
 import { useCanView } from '@/features/auth/useCanView';
 import { noPermissionTitle, useCanDo } from '@/features/auth/useCan';
+import { useReferredCustomers } from '@/features/customers/api/customers';
 import {
   approveWithdrawal,
   bankLabel,
@@ -110,7 +112,6 @@ export function AffiliateListPage() {
         Name: c.name,
         Phone: c.phone,
         Code: c.affiliate?.referralCode ?? '',
-        CommissionRate: c.affiliate?.commissionRate ?? '',
         Referred: c.affiliate?.referredCount ?? 0,
         PendingPaise: c.affiliate?.pendingBalancePaise ?? 0,
         ConfirmedPaise: c.affiliate?.confirmedBalancePaise ?? 0,
@@ -168,6 +169,14 @@ export function AffiliateListPage() {
         <StatCard label="Confirmed" value={canViewCustomers ? formatMoneyCompact(stats.confirmed) : '—'} tone="success" />
         <StatCard label="Withdrawals to approve" value={String(stats.toApprove)} tone="error" />
       </div>
+
+      {/* Affiliate members roster */}
+      <AffiliateMembers
+        affiliates={affiliates}
+        canViewCustomers={canViewCustomers}
+        query={query}
+        onOpen={(uid) => canViewCustomers && navigate(`/customers/${uid}`)}
+      />
 
       {/* Withdrawal requests */}
       <div className="mb-3 font-display text-sm font-bold text-text-primary">Withdrawal requests</div>
@@ -317,6 +326,141 @@ export function AffiliateListPage() {
       {reject && (
         <RejectModal request={reject} onClose={() => setReject(null)} onDone={() => setReject(null)} />
       )}
+    </div>
+  );
+}
+
+/**
+ * The affiliate roster — every allocated affiliate with their referrals,
+ * lifetime commission, withdrawable balance and status. Each row expands to
+ * list the customers that affiliate referred (mounted lazily so the
+ * referredBy query only fires for an open row).
+ */
+function AffiliateMembers({
+  affiliates,
+  canViewCustomers,
+  query,
+  onOpen,
+}: {
+  affiliates: Customer[];
+  canViewCustomers: boolean;
+  query: string;
+  onOpen: (uid: string) => void;
+}) {
+  const [page, setPage] = useState(1);
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const filtered = useMemo(() => {
+    if (!query.trim()) return affiliates;
+    return affiliates.filter((c) =>
+      matchesSearch(query, [c.name, c.phone, c.affiliate?.referralCode ?? '']),
+    );
+  }, [affiliates, query]);
+  const pageRows = paginate(filtered, page, PAGE);
+
+  const cols = ['Affiliate', 'Code', 'Referrals', 'Commission earned', 'Wallet balance', 'Status'];
+
+  return (
+    <>
+      <div className="mb-3 font-display text-sm font-bold text-text-primary">Affiliate members</div>
+      <div className="mb-3 overflow-hidden rounded-xl border border-border-subtle bg-surface-card">
+        <table className="w-full border-collapse">
+          <thead>
+            <tr>
+              <th className="w-8 border-b border-border-subtle px-2 py-3" />
+              {cols.map((h) => (
+                <th
+                  key={h}
+                  className={cn(
+                    'whitespace-nowrap border-b border-border-subtle px-4 py-3 font-ui text-[11px] font-bold uppercase tracking-[0.04em] text-text-tertiary',
+                    h === 'Referrals' || h === 'Commission earned' || h === 'Wallet balance' ? 'text-right' : 'text-left',
+                  )}
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {!canViewCustomers ? (
+              <tr><td colSpan={7} className="px-4 py-10 text-center font-ui text-[13px] text-text-tertiary">Needs the Customers permission to list affiliates.</td></tr>
+            ) : filtered.length === 0 ? (
+              <tr><td colSpan={7} className="px-4 py-10 text-center font-ui text-[13px] text-text-tertiary">{affiliates.length === 0 ? 'No affiliates yet.' : 'No matching affiliates.'}</td></tr>
+            ) : (
+              pageRows.map((c) => {
+                const a = c.affiliate;
+                const open = expanded === c.uid;
+                return (
+                  <Fragment key={c.uid}>
+                    <tr className="hover:bg-surface-app">
+                      <td className="border-b border-border-subtle px-2 py-3 text-center">
+                        <button onClick={() => setExpanded(open ? null : c.uid)} className="text-text-tertiary hover:text-text-primary" title={open ? 'Collapse' : 'Show referred customers'}>
+                          {open ? <RiArrowDownSLine size={18} /> : <RiArrowRightSLine size={18} />}
+                        </button>
+                      </td>
+                      <td
+                        onClick={() => onOpen(c.uid)}
+                        className={cn('whitespace-nowrap border-b border-border-subtle px-4 py-3 font-ui text-[13px] font-bold text-text-primary', canViewCustomers && 'cursor-pointer hover:text-brand-primary')}
+                      >
+                        {c.name}
+                        <div className="font-ui text-[11px] font-medium text-text-tertiary">{c.phone}</div>
+                      </td>
+                      <td className="whitespace-nowrap border-b border-border-subtle px-4 py-3 font-ui text-[13px] font-medium text-text-secondary">{a?.referralCode ?? '—'}</td>
+                      <td className="whitespace-nowrap border-b border-border-subtle px-4 py-3 text-right font-ui text-[13px] font-bold text-text-primary">{a?.referredCount ?? 0}</td>
+                      <td className="whitespace-nowrap border-b border-border-subtle px-4 py-3 text-right font-ui text-[13px] font-bold text-brand-gold-strong">{formatMoneyInt(a?.lifetimeEarningsPaise ?? 0)}</td>
+                      <td className="whitespace-nowrap border-b border-border-subtle px-4 py-3 text-right font-ui text-[13px] font-medium text-text-secondary">{formatMoneyInt(a?.confirmedBalancePaise ?? 0)}</td>
+                      <td className="whitespace-nowrap border-b border-border-subtle px-4 py-3">
+                        <Badge tone={a?.enabled ? 'success' : 'neutral'}>{a?.enabled ? 'Active' : 'Revoked'}</Badge>
+                      </td>
+                    </tr>
+                    {open && (
+                      <tr>
+                        <td colSpan={7} className="border-b border-border-subtle bg-surface-app px-4 py-3">
+                          <ReferredList uid={c.uid} onOpen={onOpen} />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+      {filtered.length > PAGE && <Pagination page={page} total={filtered.length} pageSize={PAGE} onPage={setPage} noun="affiliates" />}
+    </>
+  );
+}
+
+/** The customers a given affiliate referred (`referredBy.affiliateUid ==`). */
+function ReferredList({ uid, onOpen }: { uid: string; onOpen: (uid: string) => void }) {
+  const { data, loading } = useReferredCustomers(uid);
+  const referred = useMemo(
+    () =>
+      [...data].sort(
+        (a, b) => (b.referredBy?.linkedAt?.toMillis?.() ?? 0) - (a.referredBy?.linkedAt?.toMillis?.() ?? 0),
+      ),
+    [data],
+  );
+  if (loading) return <div className="font-ui text-[12px] text-text-tertiary">Loading referred customers…</div>;
+  if (referred.length === 0) return <div className="font-ui text-[12px] text-text-tertiary">No referred customers yet.</div>;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="font-ui text-[11px] font-bold uppercase tracking-[0.04em] text-text-tertiary">
+        Referred customers ({referred.length})
+      </div>
+      <div className="flex flex-col divide-y divide-border-subtle">
+        {referred.map((r) => (
+          <button
+            key={r.uid}
+            onClick={() => onOpen(r.uid)}
+            className="flex items-center justify-between py-1.5 text-left font-ui text-[13px] text-text-primary hover:text-brand-primary"
+          >
+            <span className="font-medium">{r.name}<span className="ml-2 text-[11px] text-text-tertiary">{r.phone}</span></span>
+            <span className="text-[11px] text-text-tertiary">{r.referredBy?.linkedAt?.toDate ? dateShort(r.referredBy.linkedAt.toDate()) : ''}</span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

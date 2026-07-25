@@ -15,58 +15,24 @@ export function referralCode(name: string, uid: string): string {
   return `${first}-${uid.slice(0, 4).toUpperCase()}`;
 }
 
-/**
- * The rate is STORED as a fraction (production carries 0.05 for 5%), and both
- * the accrual engine (commissions.ts normaliseRate) and this module have always
- * accepted the percent form too — so `5` and `0.05` both mean 5%.
- *
- * The bounds are new. `z.number().nonnegative()` alone accepted 500, which
- * became a rate of 5.0 — a 500% commission, paid out of real money on every
- * referred order until someone noticed. Anything above 100 (percent) is a typo,
- * never an intention.
- */
-export function normaliseCommissionRate(raw: number): number {
-  if (!Number.isFinite(raw) || raw < 0) {
-    throw new HttpsError('invalid-argument', 'Enter a commission rate between 0% and 100%.');
-  }
-  if (raw > 100) {
-    throw new HttpsError('invalid-argument', 'Commission rate cannot be more than 100%.');
-  }
-  const rate = raw > 1 ? raw / 100 : raw; // accept 5 or 0.05
-  if (rate < 0 || rate > 1) {
-    throw new HttpsError('invalid-argument', 'Commission rate cannot be more than 100%.');
-  }
-  return rate;
-}
 
 export const adminAllocateAffiliate = onCall(callableOpts, async (req) => {
   const { uid: actor } = await requireModule(req, 'affiliateProgram', 'edit');
-  // commissionRate is optional: the Customers screens toggle affiliate access
-  // without asking for a rate, and requiring it here made that toggle fail with
-  // invalid-argument every time. When it is omitted we keep the rate the
-  // affiliate already had, else fall back to settings/affiliate.
+  // No commission rate — commission is per-product now. Allocation only enables
+  // the affiliate relationship and (optionally) wallet-withdrawal access.
   const parsed = z
     .object({
       uid: z.string().min(1),
-      commissionRate: z.number().nonnegative().optional(),
       walletEnabled: z.boolean().optional(),
     })
     .safeParse(req.data);
   if (!parsed.success) throw new HttpsError('invalid-argument', 'Invalid payload.');
-  const { uid, commissionRate, walletEnabled } = parsed.data;
+  const { uid, walletEnabled } = parsed.data;
 
   const ref = db.doc(`customers/${uid}`);
   const snap = await ref.get();
   if (!snap.exists) throw new HttpsError('not-found', 'Customer not found.');
   const existing = snap.get('affiliate') as Record<string, any> | null;
-
-  let resolvedRate = commissionRate;
-  if (resolvedRate == null) resolvedRate = Number(existing?.commissionRate ?? NaN);
-  if (!Number.isFinite(resolvedRate)) {
-    const settings = await db.doc('settings/affiliate').get();
-    resolvedRate = Number(settings.get('defaultCommissionRate') ?? 0.05);
-  }
-  const rate = normaliseCommissionRate(resolvedRate);
 
   const now = FieldValue.serverTimestamp();
 
@@ -76,7 +42,6 @@ export const adminAllocateAffiliate = onCall(callableOpts, async (req) => {
   // confirmCommissionsForOrder) that landed between the read and the write.
   const update: Record<string, unknown> = {
     'affiliate.enabled': true,
-    'affiliate.commissionRate': rate,
     // The allocate screen's 'Enable affiliate wallet access' toggle used to be
     // accepted and dropped on the floor; at least persist what the admin chose.
     'affiliate.walletEnabled': walletEnabled ?? existing?.walletEnabled ?? true,
@@ -101,71 +66,41 @@ export const adminAllocateAffiliate = onCall(callableOpts, async (req) => {
     });
   }
   await ref.update(update);
-  await writeAudit({ actorUid: actor, action: 'affiliate.allocated', entity: 'customers', entityId: uid, meta: { rate } });
+  await writeAudit({ actorUid: actor, action: 'affiliate.allocated', entity: 'customers', entityId: uid, meta: {} });
   return { ok: true };
 });
 
 /**
- * adminUpdateAffiliateCommission — change an EXISTING affiliate's terms.
+ * adminUpdateAffiliateCommission — change an EXISTING affiliate's wallet access.
  *
- * `adminAllocateAffiliate` set `affiliate.commissionRate` once, at allocation,
- * and nothing anywhere could change it afterwards: correcting a rate meant
- * editing the customer document by hand in the console. This is the missing
- * half — the same `affiliateProgram.edit` gate its siblings use, the same
- * field-path writes (a whole-map replace would discard commission increments
- * committed since the read), and an audit entry carrying before/after so a rate
- * change is reconstructable.
- *
- * NOT retroactive, by construction: `commissions/{orderId}` stores the rate AND
- * the resolved `commissionPaise` at accrual time, and every later step
- * (confirmation, reversal, payout settlement) works from the stored figures.
- * Changing the rate only affects orders placed after the change.
- *
- * Deliberately separate from allocate rather than folded into it: allocate is
- * also the Customers-screen "make this customer an affiliate" toggle, which
- * sends no rate at all, so an admin editing terms needs a call that cannot
- * silently re-enable a revoked affiliate as a side effect.
+ * With the per-affiliate commission rate removed, the only editable "term" left
+ * is whether the affiliate may withdraw (walletEnabled). Same
+ * `affiliateProgram.edit` gate and field-path writes as its siblings.
  */
 export const adminUpdateAffiliateCommission = onCall(callableOpts, async (req) => {
   const { uid: actor } = await requireModule(req, 'affiliateProgram', 'edit');
   const parsed = z
     .object({
       uid: z.string().min(1),
-      /** Fraction (0.05) or percent (5) — both accepted, stored as a fraction. */
-      commissionRate: z.number().optional(),
-      walletEnabled: z.boolean().optional(),
+      walletEnabled: z.boolean(),
     })
     .safeParse(req.data);
   if (!parsed.success) throw new HttpsError('invalid-argument', 'Invalid payload.');
-  const { uid, commissionRate, walletEnabled } = parsed.data;
-  if (commissionRate == null && walletEnabled == null) {
-    throw new HttpsError('invalid-argument', 'Nothing to update.');
-  }
+  const { uid, walletEnabled } = parsed.data;
 
   const ref = db.doc(`customers/${uid}`);
   const snap = await ref.get();
   if (!snap.exists) throw new HttpsError('not-found', 'Customer not found.');
   const existing = snap.get('affiliate') as Record<string, any> | null;
-  // Only an allocated affiliate has terms to edit. Writing a rate onto a
-  // customer who is not one would create a half-built `affiliate` map with no
-  // referral code and no balances — which every reader treats as an affiliate.
   if (!existing) {
     throw new HttpsError('failed-precondition', 'This customer is not an affiliate yet.');
   }
 
-  const before = {
-    commissionRate: Number(existing.commissionRate ?? 0),
-    walletEnabled: existing.walletEnabled !== false,
-  };
-  const rate = commissionRate == null ? before.commissionRate : normaliseCommissionRate(commissionRate);
-  const wallet = walletEnabled ?? before.walletEnabled;
-
-  const update: Record<string, unknown> = {
-    'affiliate.commissionRate': rate,
-    'affiliate.walletEnabled': wallet,
+  const before = { walletEnabled: existing.walletEnabled !== false };
+  await ref.update({
+    'affiliate.walletEnabled': walletEnabled,
     updatedAt: FieldValue.serverTimestamp(),
-  };
-  await ref.update(update);
+  });
 
   await writeAudit({
     actorUid: actor,
@@ -173,10 +108,10 @@ export const adminUpdateAffiliateCommission = onCall(callableOpts, async (req) =
     entity: 'customers',
     entityId: uid,
     before,
-    after: { commissionRate: rate, walletEnabled: wallet },
-    meta: { rate, walletEnabled: wallet },
+    after: { walletEnabled },
+    meta: { walletEnabled },
   });
-  return { ok: true, commissionRate: rate, walletEnabled: wallet };
+  return { ok: true, walletEnabled };
 });
 
 export const adminRevokeAffiliate = onCall(callableOpts, async (req) => {

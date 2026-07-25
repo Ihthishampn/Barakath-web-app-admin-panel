@@ -144,10 +144,18 @@ export async function performCancellation(opts: CancelOptions): Promise<void> {
     // reconstructed if some future path double-releases it.
     const applied = (o.appliedCoupon as Record<string, unknown> | null) ?? null;
     const alreadyReleased = !!o.couponReleasedAt;
-    const userCouponId = alreadyReleased
+    // A deferred (razorpay) order that was cancelled BEFORE its payment never
+    // consumed its coupon (placeOrder stamps `couponConsumedAt: null` and
+    // verifyPayment sets it on capture) — so there is nothing to release, and
+    // decrementing the counter would push it BELOW what other orders hold.
+    // `=== null` matches only those: a legacy order has no such field (undefined)
+    // and a consumed order carries a timestamp, both of which release normally.
+    const neverConsumed = o.couponConsumedAt === null;
+    const skipRelease = alreadyReleased || neverConsumed;
+    const userCouponId = skipRelease
       ? null
       : (o.userCouponId as string | null) ?? (applied?.userCouponId as string | null) ?? null;
-    const promoCouponId = alreadyReleased
+    const promoCouponId = skipRelease
       ? null
       : (o.couponId as string | null) ?? (applied?.couponId as string | null) ?? null;
     const userCouponRef =

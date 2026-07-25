@@ -105,8 +105,21 @@ class _Content extends StatefulWidget {
 
 class _ContentState extends State<_Content> {
   final _gallery = PageController();
+  final _scroll = ScrollController();
   int _imageIndex = 0;
   late int _variantIndex = _firstInStockVariant();
+
+  @override
+  void initState() {
+    super.initState();
+    // Always open at the top. A product opened from "You may also like" at the
+    // bottom of another product page would otherwise inherit that page's scroll
+    // offset — Flutter's PageStorage restores it onto this same-typed route — and
+    // land the customer near the bottom. Reset once, after the first layout.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scroll.hasClients) _scroll.jumpTo(0);
+    });
+  }
 
   /// Default the size selection to the first in-stock variant so the Add button
   /// isn't disabled on first paint when variant[0] happens to be out of stock.
@@ -133,6 +146,7 @@ class _ContentState extends State<_Content> {
   @override
   void dispose() {
     _gallery.dispose();
+    _scroll.dispose();
     super.dispose();
   }
 
@@ -144,6 +158,7 @@ class _ContentState extends State<_Content> {
         _topBar(context, p),
         Expanded(
           child: ListView(
+            controller: _scroll,
             padding: EdgeInsets.zero,
             children: [
               _galleryView(scheme),
@@ -187,10 +202,9 @@ class _ContentState extends State<_Content> {
                       const SizedBox(height: AppSpacing.x8),
                       _specTable(),
                     ],
-                    if (p.ratingCount > 0) ...[
-                      const SizedBox(height: AppSpacing.x24),
-                      _reviewsSummary(context),
-                    ],
+                    // Always shown — review-derived, 1.0 ★ · 0 ratings baseline.
+                    const SizedBox(height: AppSpacing.x24),
+                    _reviewsSummary(context),
                     const SizedBox(height: AppSpacing.x24),
                     _relatedSection(context),
                   ],
@@ -328,19 +342,18 @@ class _ContentState extends State<_Content> {
                   letterSpacing: 0.3,
                   color: scheme.tagText)),
         ),
-        if (p.ratingCount > 0) ...[
-          const SizedBox(width: AppSpacing.x10),
-          const Icon(Icons.star_rounded, size: 15, color: AppColors.brandAmber),
-          const SizedBox(width: 3),
-          Text(p.rating.toStringAsFixed(1),
-              style: AppType.bodyMedium.copyWith(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.textPrimary)),
-          const SizedBox(width: 3),
-          Text('(${Money.count(p.ratingCount)} reviews)',
-              style: AppType.bodySmall.copyWith(color: AppColors.textSecondary)),
-        ],
+        // Rating is always shown — review-derived, 1.0 ★ · 0 reviews baseline.
+        const SizedBox(width: AppSpacing.x10),
+        const Icon(Icons.star_rounded, size: 15, color: AppColors.brandAmber),
+        const SizedBox(width: 3),
+        Text(p.rating.toStringAsFixed(1),
+            style: AppType.bodyMedium.copyWith(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: AppColors.textPrimary)),
+        const SizedBox(width: 3),
+        Text('(${Money.count(p.ratingCount)} reviews)',
+            style: AppType.bodySmall.copyWith(color: AppColors.textSecondary)),
       ],
     );
   }

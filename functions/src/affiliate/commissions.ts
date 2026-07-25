@@ -69,18 +69,18 @@ export interface CommissionLine {
   /** Post-discount merchandise value of this line, in paise. */
   eligiblePaise: number;
   /**
-   * Flat per-unit commission from the catalogue — the variant's
-   * `commissionPaise`, or the product's own for a variant-less product. This is
-   * the number the storefront advertises as guaranteed earnings.
+   * The product's fixed per-unit commission (paise), or null when the product is
+   * configured with a percentage instead. This is the number the storefront
+   * advertises as guaranteed earnings.
    */
   commissionPaise: number | null;
-  /** Product-level override of the affiliate's rate (`affiliateCommissionRate`). */
+  /** The product's percentage commission (`affiliateCommissionRate`), fraction. */
   productCommissionRate: number | null;
   /** `isAffiliateEligible` — an explicit false excludes the line entirely. */
   affiliateEligible: boolean;
 }
 
-type CommissionBasis = 'per_unit' | 'product_rate' | 'affiliate_rate';
+type CommissionBasis = 'per_unit' | 'product_rate' | 'none';
 
 interface LineAccrual {
   productId: string;
@@ -91,40 +91,39 @@ interface LineAccrual {
 }
 
 /**
- * Commission for a single line, in the precedence the catalogue implies:
+ * Commission for a single line, from the PRODUCT's own configuration only (the
+ * per-affiliate rate has been removed):
  *
- *   1. the ordered variant's (or variant-less product's) flat `commissionPaise`,
- *      charged per unit — the storefront prints "you earn ₹X per sale" from
- *      exactly this field, so honouring anything else makes the product page a
- *      lie. It is deliberately NOT scaled by the order discount: it is a
- *      promise per sale, not a share of revenue (the total is still capped
+ *   1. the product's fixed `commissionPaise`, charged per unit — the storefront
+ *      prints "you earn ₹X per sale" from exactly this field, so honouring
+ *      anything else makes the product page a lie. Deliberately NOT scaled by
+ *      the order discount: it is a promise per sale (the total is still capped
  *      against the order's post-discount merchandise value by the caller).
- *   2. the product's own `affiliateCommissionRate`, applied to the line's
- *      post-discount value.
- *   3. the affiliate's flat `affiliate.commissionRate` — the historical
- *      behaviour, now only the last resort.
+ *   2. else the product's `affiliateCommissionRate` (percentage), applied to the
+ *      line's post-discount value.
+ *   3. else nothing.
+ *
+ * A product always has exactly one of the two configured (the admin form + the
+ * backfill guarantee it), so line 3 only covers an affiliate-ineligible line.
  */
-function lineAccrual(l: CommissionLine, affiliateRate: number): LineAccrual {
+function lineAccrual(l: CommissionLine): LineAccrual {
   const base = { productId: l.productId, variantId: l.variantId, qty: l.qty };
   if (!l.affiliateEligible) {
-    return { ...base, basis: 'affiliate_rate', commissionPaise: 0 };
+    return { ...base, basis: 'none', commissionPaise: 0 };
   }
-  // `null` means "no flat figure configured" and falls through to the rates
-  // below; any NUMBER the admin stored is authoritative — including 0, which is
-  // the only way to say "this variant pays nothing" (the form deliberately
-  // distinguishes a blank field from a typed 0, and isAffiliateEligible is
-  // written true everywhere and not editable). Treating 0 as "unset" silently
-  // paid the affiliate's percentage rate on a product configured to pay none.
+  // `null` means "not the fixed-amount path" → fall through to the percentage;
+  // any NUMBER the admin stored is authoritative — including 0, the only way to
+  // say "this product pays nothing". Treating 0 as "unset" would silently pay
+  // the percentage on a product configured to pay none.
   const perUnit = l.commissionPaise == null ? NaN : Number(l.commissionPaise);
   if (Number.isFinite(perUnit) && perUnit >= 0) {
     return { ...base, basis: 'per_unit', commissionPaise: Math.max(0, Math.floor(perUnit * l.qty)) };
   }
   const productRate = normaliseRate(l.productCommissionRate);
-  const rate = productRate > 0 ? productRate : affiliateRate;
   return {
     ...base,
-    basis: productRate > 0 ? 'product_rate' : 'affiliate_rate',
-    commissionPaise: Math.max(0, Math.floor(l.eligiblePaise * rate)),
+    basis: productRate > 0 ? 'product_rate' : 'none',
+    commissionPaise: Math.max(0, Math.floor(l.eligiblePaise * productRate)),
   };
 }
 
@@ -199,19 +198,20 @@ export function accrueCommission(tx: Transaction, p: AccrualParams): number {
     return Number(p.existingCommission.get('commissionPaise') ?? 0);
   }
 
-  const rate = normaliseRate(
-    (p.affiliateSnap.get('affiliate') as { commissionRate?: number } | undefined)?.commissionRate,
-  );
-
-  // Per-line accrual is the real path; the flat-rate fallback only covers a
-  // caller that has no line breakdown to offer (legacy/repair paths).
+  // Per-line accrual from each product's own commission config is the only path
+  // now. A caller with no line breakdown (a legacy/repair path) can no longer
+  // derive a commission — there is no per-affiliate rate to fall back on — so it
+  // accrues nothing rather than guessing.
   const lines = p.lines ?? [];
-  const breakdown = lines.map((l) => lineAccrual(l, rate));
-  const rawPaise = breakdown.length
-    ? breakdown.reduce((s, b) => s + b.commissionPaise, 0)
-    : Math.floor(p.eligiblePaise * rate);
+  const breakdown = lines.map((l) => lineAccrual(l));
+  const rawPaise = breakdown.reduce((s, b) => s + b.commissionPaise, 0);
   const commissionPaise = Math.max(0, Math.min(rawPaise, Math.max(0, p.eligiblePaise)));
   if (commissionPaise <= 0) return 0;
+
+  // Effective blended rate this order earned (fraction), for any generic "X%"
+  // reader — the per-product configuration means there is no single input rate,
+  // so the ledger records what the money actually worked out to.
+  const effectiveRate = p.eligiblePaise > 0 ? commissionPaise / Math.max(1, p.eligiblePaise) : 0;
 
   const now = FieldValue.serverTimestamp();
   const ref = commissionRefForOrder(p.orderId);
@@ -225,9 +225,10 @@ export function accrueCommission(tx: Transaction, p: AccrualParams): number {
     orderTotalPaise: p.orderTotalPaise,
     /** Merchandise value the commission was charged against (post-discount). */
     eligiblePaise: Math.max(0, p.eligiblePaise),
-    // Kept for back-compat with every existing reader; it is now only the
-    // fallback rate, which is why the per-line breakdown is stored alongside.
-    commissionRate: rate,
+    // The effective blended rate this order earned (per-product config means no
+    // single input rate). Kept for back-compat readers; the per-line breakdown
+    // alongside is the real explanation.
+    commissionRate: effectiveRate,
     commissionPaise,
     /** How each line earned — lets the admin/affiliate explain the number. */
     lineBreakdown: breakdown,

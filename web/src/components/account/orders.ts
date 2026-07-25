@@ -15,6 +15,7 @@ import type { Order, OrderItem, OrderStatus, OrderTimelineEntry, Ts } from '@bar
 export type StatusTone = 'gold' | 'brand' | 'info' | 'success' | 'error';
 
 export const ORDER_STATUS_META: Record<OrderStatus, { label: string; tone: StatusTone }> = {
+  pending_payment: { label: 'Payment pending', tone: 'error' },
   accepted: { label: 'Accepted', tone: 'gold' },
   packing: { label: 'Packing', tone: 'gold' },
   packed: { label: 'Packed', tone: 'gold' },
@@ -36,10 +37,10 @@ export function statusMeta(status: OrderStatus | string): { label: string; tone:
   return { label: words ? words.charAt(0).toUpperCase() + words.slice(1) : 'Update', tone: 'info' };
 }
 
-const OPEN_STATUSES: OrderStatus[] = ['accepted', 'packing', 'packed', 'shipped', 'out_for_delivery'];
+const OPEN_STATUSES: OrderStatus[] = ['pending_payment', 'accepted', 'packing', 'packed', 'shipped', 'out_for_delivery'];
 export const isOpen = (s: OrderStatus): boolean => OPEN_STATUSES.includes(s);
 export const isCancellable = (s: OrderStatus): boolean =>
-  s === 'accepted' || s === 'packing' || s === 'packed';
+  s === 'pending_payment' || s === 'accepted' || s === 'packing' || s === 'packed';
 
 /**
  * A delayed order: still open (not delivered, not cancelled) and its promised
@@ -67,6 +68,13 @@ export function statusBanner(order: Order): { tone: StatusTone; text: string } {
       return { tone: 'success', text: `Delivered${order.deliveredAt ? ` on ${fmtDate(order.deliveredAt)}` : ''}` };
     case 'cancelled':
       return { tone: 'error', text: 'This order was cancelled.' };
+    // Placed online but not yet paid — it isn't accepted or "being prepared".
+    // The detail page renders a dedicated "Pay now" banner with the amount due
+    // over this, so keep the copy about completing payment, never a delivery ETA.
+    case 'pending_payment':
+      return order.paymentStatus === 'failed'
+        ? { tone: 'error', text: 'Payment failed · pay now to confirm this order.' }
+        : { tone: 'gold', text: 'Payment pending · complete payment to confirm this order.' };
   }
   // Open order whose promised date has passed — never show a stale "arriving
   // <past date>"; say it's running late instead, like Amazon/Flipkart do.

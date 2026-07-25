@@ -125,7 +125,7 @@ export function validateImport(text: string, categories: Category[]): ParsedImpo
       errors.push({ line, message: 'Stock must be a whole number ≥ 0.' });
       continue;
     }
-    const ladder = validatePriceLadder({ price: price / 100, offer: offer / 100, referral: '', comm: '' });
+    const ladder = validatePriceLadder({ price: price / 100, offer: offer / 100, referral: '' });
     if (ladder.offer) {
       errors.push({ line, message: ladder.offer });
       continue;

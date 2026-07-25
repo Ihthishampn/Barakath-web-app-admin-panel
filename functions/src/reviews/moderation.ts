@@ -1,22 +1,14 @@
 /**
- * adminModerateReview — publish / reject a product review.
+ * adminModerateReview — publish / reject (take down) a product review.
  *
- * Moderation is privileged because it does not only flip the review's status:
- * it also has to move the PRODUCT's rating aggregate, and products/{id} is
- * gated on the products module. Done from the client that meant a sub-admin
- * holding only the reviews permission could never approve anything (the
- * transaction died on the product write). The whole decision therefore lives
- * here: one transaction stamps the review and recomputes the product's
- * rating/ratingCount from the reviews that are actually approved, so the
- * aggregate self-heals instead of drifting on every replay.
- *
- * Rating authority (see the write block below): `rating`/`ratingCount` on the
- * product are DERIVED and owned by nobody. The admin product form owns
- * `seedRating`/`seedRatingCount` — the launch / migrated aggregate that has no
- * review docs behind it — this function owns
- * `reviewRatingSum`/`reviewRatingCount`, and the displayed pair is always the
- * two sides combined. Both writers recompute the pair the same way, so neither
- * can silently destroy the other's numbers.
+ * Reviews from verified purchasers are born `approved` and count immediately
+ * (see onReviewWritten + firestore.rules), so this callable's real job is
+ * letting a moderator REJECT an abusive review (or re-publish one). It only
+ * flips the review's `status` and writes the audit row — it does NOT touch the
+ * product's rating aggregate. That is owned solely by the `onReviewWritten`
+ * trigger (reviews/aggregate.ts), which recomputes `rating`/`ratingCount` from
+ * the approved review set on any review write, so a status change here is
+ * picked up automatically and the two writers can never disagree.
  */
 import { onCall, HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import { z } from 'zod';
@@ -60,83 +52,18 @@ export const adminModerateReview = onCall(callableOpts, async (req) => {
   const rref = db.doc(`reviews/${reviewId}`);
 
   const out = await db.runTransaction(async (tx) => {
-    // ── reads first ──
     const snap = await tx.get(rref);
     if (!snap.exists) throw new HttpsError('not-found', 'Review not found.');
     const r = snap.data() as Record<string, any>;
-    // The STORED status decides — a replayed or duplicated click is a no-op and
-    // can never double-count the rating.
+    // The STORED status decides — a replayed or duplicated click is a no-op.
     if (r.status === status) return { changed: false, productId: r.productId as string };
 
-    const productId = String(r.productId ?? '');
-    // Only a decision that adds to or removes from the APPROVED set may touch
-    // the aggregate. A pending → rejected review never contributed anything, so
-    // recomputing would overwrite a rating the reviews cannot reproduce — every
-    // product carries an admin-entered / seeded rating with no review docs
-    // behind it, and the recompute would silently zero it.
-    const affectsAggregate = r.status === 'approved' || status === 'approved';
-    const pref = productId && affectsAggregate ? db.doc(`products/${productId}`) : null;
-    const psnap = pref ? await tx.get(pref) : null;
-
-    // Recompute the aggregate from the reviews that are actually approved rather
-    // than nudging the stored average — that is what keeps it correct after a
-    // deleted product, a hand-edited rating or a lost write.
-    let approved: Array<{ id: string; rating: number }> = [];
-    if (psnap?.exists) {
-      const q = await tx.get(
-        db.collection('reviews').where('productId', '==', productId).where('status', '==', 'approved'),
-      );
-      approved = q.docs.map((d) => ({ id: d.id, rating: Number(d.get('rating') ?? 0) }));
-    }
-
-    // ── writes ──
+    // Flip the status only. `onReviewWritten` (reviews/aggregate.ts) sees this
+    // write and recomputes the product's rating/ratingCount from the approved
+    // set, so nothing here touches the product.
     const now = FieldValue.serverTimestamp();
     tx.update(rref, { status, moderatedBy: actor, moderatedAt: now, updatedAt: now });
-
-    if (psnap?.exists && pref) {
-      // Apply this decision to the set the query returned (it cannot see the
-      // write above).
-      const others = approved.filter((x) => x.id !== reviewId);
-      const next =
-        status === 'approved' ? [...others, { id: reviewId, rating: Number(r.rating ?? 0) }] : others;
-      const reviewCount = next.length;
-      const reviewSum = next.reduce((a, x) => a + x.rating, 0);
-
-      // The admin-entered aggregate is a SEED, not a rival value: a product
-      // migrated from the old store carries "4.6 from 312 ratings" with no
-      // review docs behind it. Writing the review-only average over it (what
-      // this used to do) replaced that with "2.0 from 1" on the first approval,
-      // unrecoverably. Combine the two instead.
-      const storedSeedCount = Number(psnap.get('seedRatingCount'));
-      const hasSeedFields = Number.isFinite(storedSeedCount);
-      // Back-fill for products saved before the seed fields existed: whatever
-      // the stored count holds over the reviews that were ALREADY approved
-      // cannot have come from a review, so it is seed. (`approved` is the
-      // pre-decision set — precisely what the old recompute would have written,
-      // so a product whose aggregate was already review-only infers seed 0.)
-      const seedCount = hasSeedFields
-        ? Math.max(0, storedSeedCount)
-        : Math.max(0, Number(psnap.get('ratingCount') ?? 0) - approved.length);
-      const seedRating = Number(psnap.get(hasSeedFields ? 'seedRating' : 'rating') ?? 0);
-
-      const count = seedCount + reviewCount;
-      const rating =
-        count === 0 ? 0 : Math.round(((seedCount * seedRating + reviewSum) / count) * 10) / 10;
-      tx.update(pref, {
-        ratingCount: count,
-        rating,
-        // The review side, stored so the product form can rebuild the same
-        // combined figure without reading (and being allowed to read) reviews.
-        reviewRatingCount: reviewCount,
-        reviewRatingSum: reviewSum,
-        // Persist the back-fill so the inference above runs at most once per
-        // product; from here the seed is explicit and only the form moves it.
-        seedRatingCount: seedCount,
-        seedRating,
-        updatedAt: now,
-      });
-    }
-    return { changed: true, productId };
+    return { changed: true, productId: String(r.productId ?? '') };
   });
 
   if (out.changed) {

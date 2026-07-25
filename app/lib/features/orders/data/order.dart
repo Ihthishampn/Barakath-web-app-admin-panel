@@ -3,9 +3,12 @@ import 'package:flutter/material.dart';
 
 import '../../../core/theme/app_colors.dart';
 
-/// Order lifecycle — mirrors the shared ORDER_STATUSES enum (accepted · packing ·
-/// packed · shipped · out_for_delivery · delivered · cancelled).
+/// Order lifecycle — mirrors the shared ORDER_STATUSES enum (pending_payment ·
+/// accepted · packing · packed · shipped · out_for_delivery · delivered ·
+/// cancelled). `pendingPayment` is an online order placed but not yet paid: it
+/// only becomes `accepted` once the payment is confirmed (verifyPayment).
 enum OrderStatus {
+  pendingPayment,
   accepted,
   packing,
   packed,
@@ -16,6 +19,7 @@ enum OrderStatus {
   unknown;
 
   static OrderStatus parse(String? s) => switch (s) {
+        'pending_payment' => pendingPayment,
         'accepted' => accepted,
         'packing' => packing,
         'packed' => packed,
@@ -27,6 +31,7 @@ enum OrderStatus {
       };
 
   String get label => switch (this) {
+        pendingPayment => 'Payment pending',
         accepted => 'Accepted',
         packing => 'Packing',
         packed => 'Packed',
@@ -37,14 +42,32 @@ enum OrderStatus {
         unknown => 'Processing',
       };
 
-  /// Open = still moving through fulfilment (trackable, not terminal).
+  /// Open = still active (not terminal). A pending-payment order is open (it
+  /// shows in the active list with a "Payment pending" chip) but is NOT
+  /// trackable or cancellable until the payment lands.
   bool get isOpen => switch (this) {
-        accepted || packing || packed || shipped || outForDelivery => true,
+        pendingPayment ||
+        accepted ||
+        packing ||
+        packed ||
+        shipped ||
+        outForDelivery =>
+          true,
         _ => false,
       };
 
+  /// Awaiting the first payment — nothing to track, no invoice yet, no
+  /// customer-side cancel (the server sweeps it if the payment never comes).
+  bool get isAwaitingPayment => this == pendingPayment;
+
+  /// Includes [pendingPayment]: the owner can cancel an unpaid online order from
+  /// the "Payment pending" screen (releases its held stock + coupon). Stops at
+  /// 'packed' — past that the customer goes through returns.
   bool get isCancellable =>
-      this == accepted || this == packing || this == packed;
+      this == pendingPayment ||
+      this == accepted ||
+      this == packing ||
+      this == packed;
   bool get isReturnable => this == delivered;
 
   /// Badge palette (bg, fg) — matches the Figma status chips.

@@ -196,16 +196,20 @@ export const stockReservationSweep = onSchedule(
 // ── Abandoned (never-paid) online orders ───────────────────────────
 
 /**
- * How long an unpaid online order is left alone before it is reclaimed.
+ * How long an unpaid online order holds its stock before it is reclaimed.
  *
- * This is a hard floor on "the customer is definitely not still paying", not a
- * UX timer: the Razorpay sheet can sit open through a bank OTP, a retry, a
- * 3-D-Secure redirect and an app switch, and both clients also expose "Pay now"
- * on the order afterwards. Thirty minutes is comfortably past all of that —
- * shorter would risk cancelling an order mid-payment, which is the one outcome
- * that must never happen (the money would already have left the customer).
+ * Aligned with the checkout reservation window (RESERVATION_TTL_MS, 15 min): the
+ * moment an order is placed its units come out of the catalogue, and if the
+ * payment never lands they must go back on sale ~15 minutes later — the same
+ * hold the storefront promises on every product, badged or not. The re-assert
+ * inside `reclaimAbandonedOrder` (below) is what keeps this safe at 15 minutes:
+ * it re-reads the order in a transaction and refuses to cancel one whose payment
+ * has been captured in the meantime, so a customer still finishing a bank OTP is
+ * never cancelled out from under a payment that actually went through — and if
+ * their attempt failed, both clients keep offering "Pay now" until the sweep
+ * reclaims it.
  */
-export const ABANDONED_PAYMENT_GRACE_MS = 30 * 60 * 1000;
+export const ABANDONED_PAYMENT_GRACE_MS = 15 * 60 * 1000;
 
 /** Cancellation reason stamped on the order, its timeline and the admin list. */
 export const ABANDONED_PAYMENT_REASON = 'Payment not completed';
@@ -253,10 +257,10 @@ async function reclaimAbandonedOrder(
     // (some delivered ones sit at paymentStatus 'pending' for ever, because COD
     // was never captured through a gateway) and must never be swept.
     if (o.paymentMethod !== 'razorpay') return false;
-    // 'accepted' is the only status an unpaid order can hold: anything further
-    // along was accepted by an admin who saw the payment, and 'cancelled' is
-    // already done.
-    if (o.status !== 'accepted') return false;
+    // An unpaid online order holds 'pending_payment' (current) or 'accepted'
+    // (legacy). Anything further along was advanced by an admin who saw the
+    // payment, and 'cancelled' is already done.
+    if (o.status !== 'pending_payment' && o.status !== 'accepted') return false;
     if (!UNPAID_STATUSES.includes(o.paymentStatus as (typeof UNPAID_STATUSES)[number])) {
       return false;
     }
@@ -284,7 +288,7 @@ async function reclaimAbandonedOrder(
     orderId,
     actorUid: 'system',
     reason: ABANDONED_PAYMENT_REASON,
-    allowedStatuses: ['accepted'],
+    allowedStatuses: ['pending_payment', 'accepted'],
     requirePaymentStatus: [...UNPAID_STATUSES],
   });
   return true;
@@ -329,7 +333,11 @@ export async function sweepAbandonedOrders(
     // why the query is newest-first: the recent, actionable orders are always
     // at the head of the page.
     for (const d of snap.docs) {
-      if (d.get('status') === 'accepted') candidates.set(d.id, d);
+      // An unpaid online order sits at 'pending_payment' (its normal state now)
+      // or 'accepted' (legacy orders placed before acceptance was deferred).
+      // Anything further along was advanced by an admin who saw the payment.
+      const s = d.get('status');
+      if (s === 'pending_payment' || s === 'accepted') candidates.set(d.id, d);
     }
   }
 
@@ -353,13 +361,14 @@ export async function sweepAbandonedOrders(
 }
 
 /**
- * Runs every 15 minutes. With a 30-minute grace an abandoned order's stock is
- * back on sale within ~45 minutes of placement. Cloud Scheduler triggers this in
- * production; the local emulator does not auto-fire scheduled functions, so
- * tests invoke [sweepAbandonedOrders] directly.
+ * Runs every 5 minutes. With a 15-minute grace an abandoned order's stock is
+ * back on sale within ~20 minutes of placement — matching the checkout
+ * reservation hold. Cloud Scheduler triggers this in production; the local
+ * emulator does not auto-fire scheduled functions, so tests invoke
+ * [sweepAbandonedOrders] directly.
  */
 export const abandonedOrderSweep = onSchedule(
-  { region: REGION, schedule: 'every 15 minutes' },
+  { region: REGION, schedule: 'every 5 minutes' },
   async () => {
     const { reclaimed, scanned } = await sweepAbandonedOrders();
     if (reclaimed > 0 || scanned > 0) {

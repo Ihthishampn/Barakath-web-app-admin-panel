@@ -17,11 +17,14 @@ export function OrderCard({ order }: { order: Order }) {
   const href = `/account/orders/${order.id}`;
   const delivered = order.status === 'delivered';
   const cancelled = order.status === 'cancelled';
+  // Awaiting first payment: the order was placed online and never accepted
+  // because the payment hasn't been confirmed. The status pill already reads
+  // "Payment pending"; the card also offers a one-tap retry.
+  const pendingPayment = order.status === 'pending_payment';
   const thumbs = order.itemsSummary?.slice(0, 3) ?? [];
   const countLabel = `${order.itemsCount} item${order.itemsCount === 1 ? '' : 's'}`;
-  // An online order sits at paymentStatus 'pending' until verifyPayment lands,
-  // so a dismissed or declined gateway sheet leaves it owing money with nothing
-  // on this card to say so. The actual retry lives on the detail page.
+  // Owes money and can retry: a dismissed or declined gateway sheet leaves an
+  // online order unpaid. The retry ("Pay now") lives on the detail page.
   const unpaid =
     order.paymentMethod === 'razorpay' &&
     isOpen(order.status) &&
@@ -33,9 +36,11 @@ export function OrderCard({ order }: { order: Order }) {
     ? `${countLabel} · delivered ${fmtDate(order.deliveredAt)}`
     : cancelled
       ? `${countLabel} · order cancelled`
-      : isDelayed(order)
-        ? `${countLabel} · delivery delayed`
-        : `${countLabel} · arriving ${fmtDateLong(order.expectedDeliveryDate)}`;
+      : pendingPayment
+        ? `${countLabel} · awaiting payment`
+        : isDelayed(order)
+          ? `${countLabel} · delivery delayed`
+          : `${countLabel} · arriving ${fmtDateLong(order.expectedDeliveryDate)}`;
 
   return (
     <div
@@ -46,9 +51,12 @@ export function OrderCard({ order }: { order: Order }) {
         <div className="flex items-center gap-3">
           <span className="font-ui text-[15px] font-bold text-text-primary">{order.shortId}</span>
           <OrderStatusPill status={order.status} delayed={isDelayed(order)} />
-          {unpaid && (
+          {/* The pill already says "Payment pending" for a pending order; only
+              surface the extra chip when a payment actually FAILED (which the
+              pill doesn't convey). */}
+          {unpaid && order.paymentStatus === 'failed' && (
             <span className="inline-flex items-center rounded-pill bg-error-subtle px-2.5 py-1 font-ui text-[11px] font-extrabold text-error">
-              {order.paymentStatus === 'failed' ? 'Payment failed' : 'Payment pending'}
+              Payment failed
             </span>
           )}
         </div>
@@ -109,7 +117,9 @@ export function OrderCard({ order }: { order: Order }) {
                   Pay now
                 </Link>
               )}
-              {isOpen(order.status) && (
+              {/* Nothing to track and no invoice until the payment is confirmed,
+                  so an unpaid order shows only "Pay now". */}
+              {isOpen(order.status) && !pendingPayment && (
                 <Link
                   href={`/account/orders/${order.id}/track`}
                   className="inline-flex h-[38px] items-center rounded-pill border border-brand-primary px-4 font-ui text-[13px] font-bold text-brand-primary hover:bg-brand-primary-subtle"
@@ -117,12 +127,14 @@ export function OrderCard({ order }: { order: Order }) {
                   Track order
                 </Link>
               )}
-              <Link
-                href={`/account/orders/${order.id}/invoice`}
-                className="inline-flex h-[38px] items-center rounded-pill px-4 font-ui text-[13px] font-bold text-text-secondary hover:bg-surface-app"
-              >
-                Invoice
-              </Link>
+              {!pendingPayment && (
+                <Link
+                  href={`/account/orders/${order.id}/invoice`}
+                  className="inline-flex h-[38px] items-center rounded-pill px-4 font-ui text-[13px] font-bold text-text-secondary hover:bg-surface-app"
+                >
+                  Invoice
+                </Link>
+              )}
             </>
           )}
         </div>

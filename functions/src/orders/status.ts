@@ -24,6 +24,9 @@ import { notifyCommission, notifyOrderStatus } from '../notifications/events.js'
 // rejected with "Cannot move shipped → cancelled". Customers are still bounded
 // separately (CANCELLABLE_STATUSES) and can't self-cancel past 'packed'.
 const TRANSITIONS: Record<string, string[]> = {
+  // An unpaid online order can only be cancelled from the panel; it reaches
+  // 'accepted' via verifyPayment (capture), not an admin move.
+  pending_payment: ['cancelled'],
   accepted: ['packing', 'cancelled'],
   packing: ['packed', 'cancelled'],
   packed: ['shipped', 'cancelled'],

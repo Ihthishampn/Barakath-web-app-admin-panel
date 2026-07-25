@@ -111,12 +111,14 @@ export function ProductCard({ product }: { product: Product }) {
         <span className="font-display text-[16px] font-extrabold text-brand-gold-strong">
           {formatMoney2dp(sellingPaise(product))}
         </span>
-        {product.ratingCount > 0 && (
-          <span className="flex items-center gap-[3px] font-ui text-[11px] font-bold text-text-secondary">
-            <RiStarFill size={11} className="text-brand-gold" />
-            {product.rating.toFixed(1)}
+        {/* Rating is always shown — review-derived, 1.0 ★ · 0 reviews baseline. */}
+        <span className="flex items-center gap-[3px] font-ui text-[11px] font-bold text-text-secondary">
+          <RiStarFill size={11} className="text-brand-gold" />
+          {product.rating.toFixed(1)}
+          <span className="font-medium text-text-tertiary">
+            ({product.ratingCount})
           </span>
-        )}
+        </span>
       </div>
     </Link>
   );

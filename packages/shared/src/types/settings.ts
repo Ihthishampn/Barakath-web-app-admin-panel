@@ -67,7 +67,8 @@ export interface SettingsTax {
 export interface SettingsAffiliate {
   id: 'affiliate';
   enabled: boolean;
-  defaultCommissionRate: number;
+  // No global default commission rate — commission lives on each product now
+  // (amount or percentage). New products prefill from DEFAULT_PRODUCT_COMMISSION_RATE.
   commissionClearanceDays: number;
   minWithdrawalPaise: number;
   maxWithdrawalPerDayPaise: number;

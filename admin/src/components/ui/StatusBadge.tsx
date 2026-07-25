@@ -13,6 +13,9 @@ const TONE_CLASS: Record<Tone, string> = {
 
 /** Admin order badge label + tone (tech-arch §1.6a; colors from prototype). */
 const ORDER_BADGE: Record<OrderStatus, { label: string; tone: Tone }> = {
+  // Unpaid online order — placed but not yet paid, so not accepted. Sits in the
+  // Accepted admin tab; the sweep cancels it if the payment never lands.
+  pending_payment: { label: 'Payment pending', tone: 'error' },
   accepted: { label: 'Accepted', tone: 'gold' },
   packing: { label: 'Packing', tone: 'gold' },
   packed: { label: 'Packed', tone: 'gold' },

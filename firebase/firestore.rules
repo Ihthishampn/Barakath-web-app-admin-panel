@@ -75,11 +75,20 @@ service cloud.firestore {
     match /categories/{id}       { allow read: if hasAppCheck(); allow write: if canWrite('categories'); }
     match /products/{id} {
       allow read: if hasAppCheck();
-      allow write: if canWrite('products');
-      // The rating aggregate is NOT writable by review moderators from the
-      // client: approving/rejecting a review goes through the
-      // adminModerateReview callable, which checks the reviews permission and
-      // recomputes rating/ratingCount server-side (functions reviews/moderation).
+      // The rating aggregate (`rating`/`ratingCount`) is DERIVED from real
+      // approved reviews and is owned solely by the onReviewWritten trigger
+      // (functions reviews/aggregate), which runs with the Admin SDK and so
+      // bypasses these rules. NO client — admin included — may set or edit the
+      // pair: a fresh product must start at the 1.0 / 0 baseline, and an update
+      // must leave both untouched. This is what makes fabricated ratings
+      // impossible, not merely absent from the admin UI.
+      allow create: if canWrite('products')
+        && request.resource.data.rating == 1
+        && request.resource.data.ratingCount == 0;
+      allow update: if canWrite('products')
+        && request.resource.data.rating == resource.data.rating
+        && request.resource.data.ratingCount == resource.data.ratingCount;
+      allow delete: if canWrite('products');
     }
     match /flashSales/{id}       { allow read: if hasAppCheck(); allow write: if canWrite('flashSale'); }
     match /newArrivals/{id}      { allow read: if hasAppCheck(); allow write: if canWrite('newArrivals'); }
@@ -152,8 +161,12 @@ service cloud.firestore {
       // customers/{uid}/purchases/{productId} doc on delivery precisely so the
       // check collapses to a single exists().
       //
+      // A verified purchaser's review is born `approved` and goes live at once
+      // (auto-live: no approval queue). The purchase proof above is the "verified"
+      // gate; moderation exists only to TAKE DOWN an abusive review afterwards.
+      //
       // Everything the create did NOT name was attacker-chosen. Three of those
-      // fields are rendered verbatim once a moderator approves the review:
+      // fields are rendered verbatim as soon as the review is live:
       //   - `photoUrls` is spread into <img src> on the product page
       //     (web ProductDetail). Storage denies every client write under
       //     reviews/{id} (storage.rules), so a legitimate client can never
@@ -174,15 +187,15 @@ service cloud.firestore {
       // customer at one review per product. The purchase proof above is an
       // exists() on a doc that is never consumed, so with auto-ids one genuine
       // purchase let the same customer post unlimited reviews for that product
-      // — and adminModerateReview recomputes the aggregate from the approved
-      // set, so every extra approval genuinely moved the product's rating. A
-      // second submission is now an update of the same id, which the rule below
-      // only permits for the fields an owner may edit.
+      // — and onReviewWritten recomputes the aggregate from the approved set, so
+      // every extra live review genuinely moved the product's rating. A second
+      // submission is now an update of the same id, which the rule below refuses
+      // outright (update: if false).
       allow create: if hasAppCheck() && isSignedIn()
         && request.resource.data.customerId == uid()
         && id == uid() + '_' + request.resource.data.productId
         && exists(/databases/$(database)/documents/customers/$(uid())/purchases/$(request.resource.data.productId))
-        && request.resource.data.status == 'pending'
+        && request.resource.data.status == 'approved'
         && request.resource.data.rating is number
         && request.resource.data.rating >= 1
         && request.resource.data.rating <= 5

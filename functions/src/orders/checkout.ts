@@ -107,10 +107,11 @@ async function priceLines(lines: Line[]): Promise<PricedLine[]> {
     let offerPricePaise = Number(p.offerPricePaise ?? p.mrpPaise ?? 0);
     let stock = Number(p.stock ?? 0);
     let variantLabel: string | null = null;
-    // A variant-less product carries its own referral pair at the top level
-    // (admin features/products/api/products.ts nulls these out once variants
-    // exist), so this is the right default for a product with no variants.
-    let commissionPaise = p.commissionPaise == null ? null : Number(p.commissionPaise);
+    // Affiliate commission is configured at the PRODUCT level (a fixed amount or
+    // a percentage) and applies to every variant — there is no per-variant
+    // commission any more. This is the fixed-amount half; the percentage half is
+    // `affiliateCommissionRate`, copied below.
+    const commissionPaise = p.commissionPaise == null ? null : Number(p.commissionPaise);
 
     if (l.variantId) {
       const variants = (p.variants as Array<Record<string, unknown>>) ?? [];
@@ -120,9 +121,6 @@ async function priceLines(lines: Line[]): Promise<PricedLine[]> {
       offerPricePaise = Number(v.offerPricePaise ?? offerPricePaise);
       stock = Number(v.stock ?? 0);
       variantLabel = (v.label as string) ?? null;
-      // The ordered VARIANT's commission wins — this is the figure the product
-      // page advertises as guaranteed earnings for the selected option.
-      if (v.commissionPaise != null) commissionPaise = Number(v.commissionPaise);
     }
 
     out.push({
@@ -642,6 +640,126 @@ const PlaceOrderSchema = z.object({
   reservationId: z.string().nullable().optional(),
 });
 
+/** The wallet + coupon a paid order consumes (see {@link applyPaidConsumption}). */
+interface PaidConsumption {
+  uid: string;
+  orderId: string;
+  shortId: string;
+  walletUsedPaise: number;
+  walletCashbackPaise: number;
+  spinRewardPaise: number;
+  couponCashbackPaise: number;
+  couponLabel: string;
+  /** Customer wallet balance + live cashback pool BEFORE this consumption. */
+  walletBalance: number;
+  cashbackPool: number;
+  appliedUserCouponId: string | null;
+  appliedPromoId: string | null;
+}
+
+/**
+ * Debit the wallet + redeem the spin/coupon reward for an order that is being
+ * PAID: the balance debit is written into [custUpdate] (the caller commits the
+ * customer doc, so it can pack it alongside its own stats writes) and the coupon
+ * counters + wallet ledger rows are written via [tx].
+ *
+ * This is the SINGLE source of "what a paid order consumes", shared by
+ * placeOrder (a wallet-settled order consumes at placement) and verifyPayment (a
+ * razorpay order consumes at capture) — the same reason cancel.ts is shared, so
+ * the two can never drift. Deferring it to capture is what stops an unpaid
+ * online order from ever showing a debited wallet or a burnt spin reward.
+ *
+ * Writes only — every snapshot is read by the caller inside its transaction.
+ * Counters are ABSOLUTE values from those snapshots, floored at zero (the
+ * drift-repairing discipline used across checkout), never a blind increment.
+ */
+function applyPaidConsumption(
+  tx: FirebaseFirestore.Transaction,
+  custUpdate: Record<string, unknown>,
+  c: PaidConsumption,
+  snaps: {
+    userCouponRef: FirebaseFirestore.DocumentReference | null;
+    userCouponSnap: FirebaseFirestore.DocumentSnapshot | null;
+    promoRef: FirebaseFirestore.DocumentReference | null;
+    promoSnap: FirebaseFirestore.DocumentSnapshot | null;
+    promoUsageSnap: FirebaseFirestore.DocumentSnapshot | null;
+  },
+): void {
+  const now = FieldValue.serverTimestamp();
+  const { uid, orderId, shortId } = c;
+
+  // Wallet balance debit + cashback-pool drain (absolute pool write: keeps it in
+  // [0, balance] and repairs drift, where a bare decrement would preserve it).
+  if (c.walletUsedPaise > 0) {
+    custUpdate['wallet.balancePaise'] = FieldValue.increment(-c.walletUsedPaise);
+    custUpdate['wallet.lifetimeDebitsPaise'] = FieldValue.increment(c.walletUsedPaise);
+    custUpdate['wallet.cashbackBalancePaise'] = Math.max(0, c.cashbackPool - c.walletCashbackPaise);
+    custUpdate['wallet.lastTransactionAt'] = now;
+  }
+  if (c.spinRewardPaise > 0) {
+    custUpdate['wallet.breakdown.rewardsPaise'] = FieldValue.increment(c.spinRewardPaise);
+    custUpdate['wallet.lastTransactionAt'] = now;
+  }
+  if (c.couponCashbackPaise > 0) {
+    custUpdate['wallet.breakdown.cashbackPaise'] = FieldValue.increment(c.couponCashbackPaise);
+    custUpdate['wallet.lastTransactionAt'] = now;
+  }
+
+  // Personal (spin/welcome) coupon → used, honouring maxUsesPerCoupon.
+  if (c.appliedUserCouponId && snaps.userCouponRef) {
+    const uc = (snaps.userCouponSnap?.data() as Record<string, unknown> | undefined) ?? {};
+    const maxUses = Math.max(1, Number(uc.maxUsesPerCoupon ?? 1));
+    const usesAfter = Math.max(0, Number(uc.usesCount ?? 0)) + 1;
+    tx.update(snaps.userCouponRef, {
+      status: usesAfter >= maxUses ? 'used' : 'active',
+      usedAt: now, usedOnOrderId: orderId, usedOnOrderShortId: shortId,
+      usesCount: usesAfter, isNew: false, updatedAt: now,
+    });
+  }
+
+  // Wallet ledger rows — the wallet history entries the customer sees.
+  const balanceAfter = Math.max(0, c.walletBalance - c.walletUsedPaise);
+  if (c.walletUsedPaise > 0) {
+    const spendRef = db.collection(`customers/${uid}/walletTransactions`).doc();
+    tx.set(spendRef, {
+      id: spendRef.id, type: 'debit', source: 'order_payment', amountPaise: c.walletUsedPaise,
+      balanceAfterPaise: balanceAfter, title: `Used on order ${shortId}`, description: null,
+      orderId, orderShortId: shortId, refType: 'order', refId: orderId, createdAt: now,
+    });
+  }
+  if (c.spinRewardPaise > 0) {
+    const rewardRef = db.collection(`customers/${uid}/walletTransactions`).doc();
+    tx.set(rewardRef, {
+      id: rewardRef.id, type: 'credit', source: 'spin_reward', amountPaise: c.spinRewardPaise,
+      balanceAfterPaise: balanceAfter, title: `Spin reward · saved on ${shortId}`, description: c.couponLabel || null,
+      orderId, orderShortId: shortId, refType: 'coupon', refId: c.appliedUserCouponId, createdAt: now,
+    });
+  }
+  if (c.couponCashbackPaise > 0) {
+    const cashbackRef = db.collection(`customers/${uid}/walletTransactions`).doc();
+    tx.set(cashbackRef, {
+      id: cashbackRef.id, type: 'credit', source: 'cashback', amountPaise: c.couponCashbackPaise,
+      balanceAfterPaise: balanceAfter, title: `Cashback · saved on ${shortId}`, description: c.couponLabel || null,
+      orderId, orderShortId: shortId, refType: 'coupon', refId: c.appliedPromoId, createdAt: now,
+    });
+  }
+
+  // Promotional coupon counters (store budget + per-customer), so maxUsesTotal
+  // and maxUsesPerUser can actually trip.
+  if (c.appliedPromoId && snaps.promoRef) {
+    const promo = (snaps.promoSnap?.data() as Record<string, unknown> | undefined) ?? {};
+    tx.update(snaps.promoRef, {
+      usesCount: Math.max(0, Number(promo.usesCount ?? 0)) + 1,
+      updatedAt: now,
+    });
+    tx.set(
+      db.doc(`customers/${uid}/couponUsage/${c.appliedPromoId}`),
+      { id: c.appliedPromoId, customerId: uid, count: usageCount(snaps.promoUsageSnap) + 1, lastUsedAt: now, lastOrderId: orderId },
+      { merge: true },
+    );
+  }
+}
+
 export const placeOrder = onCall(callableOpts, async (req) => {
   const { uid } = await requireActiveCustomer(req);
   const parsed = PlaceOrderSchema.safeParse(req.data);
@@ -743,6 +861,9 @@ export const placeOrder = onCall(callableOpts, async (req) => {
     /** Referrer + accrual, for the affiliate's "commission earned" notification. */
     affiliateUid: string | null;
     commissionPaise: number;
+    /** True for an online order left at 'pending_payment' — its acceptance and
+     *  "Order placed" notification wait for verifyPayment, so both are skipped here. */
+    deferAccept: boolean;
   } | null = null;
 
   const result = await db.runTransaction(async (tx) => {
@@ -1084,35 +1205,21 @@ export const placeOrder = onCall(callableOpts, async (req) => {
       );
     }
 
-    // Debit wallet (if used), accrue the spin-reward tally and bump the lifetime
-    // order stats — one write. Nothing else maintains `stats.*` after signup, so
-    // without this the firstOrderOnly coupon guard above and the admin Customers
-    // list both see 0 orders forever.
+    // Whether this order's payment is settled NOW or deferred to the gateway. A
+    // wallet-covered order (nothing left to pay) is captured outright; an online
+    // order still owing money is created 'pending_payment' and NOTHING it consumes
+    // is spent yet — the wallet debit, the spin/coupon redemption and their ledger
+    // rows are ALL deferred to verifyPayment (see applyPaidConsumption), so an
+    // unpaid order never shows a debited wallet or a burnt reward. On cancel-
+    // before-pay there is simply nothing to give back. (COD is rejected above.)
+    const fullyWalletPaid = summary.payablePaise === 0;
+    const effectivePaymentMethod = fullyWalletPaid ? 'wallet' : paymentMethod;
+    const deferAccept = effectivePaymentMethod === 'razorpay';
+
+    // Lifetime order stats — bumped at placement (a cancellation reverses
+    // totalSpent; ordersCount is deliberately never reversed — see cancel.ts).
+    // Nothing else maintains stats.* after signup.
     const custUpdate: Record<string, unknown> = {};
-    if (summary.walletUsedPaise > 0) {
-      custUpdate['wallet.balancePaise'] = FieldValue.increment(-summary.walletUsedPaise);
-      custUpdate['wallet.lifetimeDebitsPaise'] = FieldValue.increment(summary.walletUsedPaise);
-      // Drain the live cashback pool by the part of this payment it funded.
-      // Written as an ABSOLUTE value derived from the clamped read above rather
-      // than FieldValue.increment(-x): that both keeps the pool inside
-      // [0, balance] on this write and repairs any earlier drift, where a bare
-      // decrement would preserve it. `cashbackPool - walletCashbackPaise` is ≥ 0
-      // by construction (walletCashbackPaise ≤ cashbackPool) and ≤ the new
-      // balance (cashbackPool ≤ walletBalance).
-      custUpdate['wallet.cashbackBalancePaise'] = cashbackPool - walletCashbackPaise;
-      custUpdate['wallet.lastTransactionAt'] = FieldValue.serverTimestamp();
-    }
-    if (spinRewardPaise > 0) {
-      custUpdate['wallet.breakdown.rewardsPaise'] = FieldValue.increment(spinRewardPaise);
-      custUpdate['wallet.lastTransactionAt'] = FieldValue.serverTimestamp();
-    }
-    if (couponCashbackPaise > 0) {
-      // Accumulate the lifetime cashback tally on the customer doc, in step with
-      // the 'cashback' ledger row written below (the Cashback tile sums the
-      // ledger; this keeps the stored breakdown coherent for anything reading it).
-      custUpdate['wallet.breakdown.cashbackPaise'] = FieldValue.increment(couponCashbackPaise);
-      custUpdate['wallet.lastTransactionAt'] = FieldValue.serverTimestamp();
-    }
     custUpdate['stats.ordersCount'] = FieldValue.increment(1);
     custUpdate['stats.totalSpentPaise'] = FieldValue.increment(summary.totalPaise);
     custUpdate['stats.lastOrderAt'] = FieldValue.serverTimestamp();
@@ -1120,19 +1227,35 @@ export const placeOrder = onCall(callableOpts, async (req) => {
       custUpdate['stats.firstOrderAt'] = FieldValue.serverTimestamp();
     }
     custUpdate['updatedAt'] = FieldValue.serverTimestamp();
+    // A wallet-settled order is PAID now → debit the wallet, redeem the
+    // coupon/spin reward and write their ledger rows immediately (wallet keys
+    // into custUpdate, the rest via tx). A deferred (razorpay) order consumes
+    // NOTHING here — the SAME helper runs in verifyPayment on capture, so an
+    // unpaid order never shows a debited wallet or a burnt reward.
+    if (!deferAccept) {
+      applyPaidConsumption(
+        tx,
+        custUpdate,
+        {
+          uid, orderId: orderRef.id, shortId,
+          walletUsedPaise: summary.walletUsedPaise, walletCashbackPaise, spinRewardPaise,
+          couponCashbackPaise, couponLabel, walletBalance, cashbackPool,
+          appliedUserCouponId, appliedPromoId,
+        },
+        { userCouponRef, userCouponSnap, promoRef, promoSnap, promoUsageSnap },
+      );
+    }
     tx.update(custRef, custUpdate);
 
     // Order doc.
     const now = FieldValue.serverTimestamp();
     const days = Number(delivery?.deliveryDaysMax ?? 5);
     const expected = Timestamp.fromMillis(Date.now() + days * 86400_000);
-    // Nothing left to collect — the wallet covered the order outright, or the
-    // discount took it to zero. With COD gone there is no "collect it later"
-    // tender at all, so such an order must be recorded as a settled wallet
-    // payment; leaving it 'pending' would strand it (createRazorpayOrder refuses
-    // an order with nothing to pay, and nothing else ever settles one).
-    const fullyWalletPaid = summary.payablePaise === 0;
-    const effectivePaymentMethod = fullyWalletPaid ? 'wallet' : paymentMethod;
+    // Nothing left to collect (wallet covered it, or the discount took it to
+    // zero) → recorded as a settled wallet payment; otherwise 'pending' until the
+    // gateway captures. `fullyWalletPaid` / `deferAccept` were resolved above,
+    // where the wallet-consumption gate needs them. An online order still owing
+    // money is NOT accepted at placement — verifyPayment promotes it on capture.
     const paymentStatus = fullyWalletPaid ? 'captured' : 'pending';
 
     // Full line items embedded on the order document (single-document model).
@@ -1162,7 +1285,7 @@ export const placeOrder = onCall(callableOpts, async (req) => {
       customerId: uid,
       customerName: (cust.name as string) || 'Customer',
       customerPhone: (cust.phone as string) || '',
-      status: 'accepted',
+      status: deferAccept ? 'pending_payment' : 'accepted',
       itemsCount: priced.reduce((s, l) => s + l.qty, 0),
       itemsSummary: priced.slice(0, 4).map((l) => ({
         productId: l.productId, productName: l.name, imageUrl: l.imageUrl, categoryTint: l.categoryTint, quantity: l.qty,
@@ -1177,6 +1300,9 @@ export const placeOrder = onCall(callableOpts, async (req) => {
       // cashback half was a prize, not a payment, and stays with the store.
       walletCashbackPaise,
       walletRealPaise,
+      // Admin campaign-coupon cashback this order earns (credited to the wallet).
+      // Stored so verifyPayment can realise it on capture for a deferred order.
+      couponCashbackPaise,
       deliveryPaise: summary.deliveryPaise,
       // Always 0 now that COD cannot be chosen. The field is still written (not
       // dropped) because every reader — admin order detail, both storefronts,
@@ -1185,7 +1311,10 @@ export const placeOrder = onCall(callableOpts, async (req) => {
       codSurchargePaise: 0,
       taxPaise: summary.taxPaise,
       totalPaise: summary.totalPaise,
-      amountPaidPaise: summary.walletUsedPaise,
+      // A deferred (razorpay) order has consumed nothing yet → 0 paid. A wallet-
+      // settled order paid its wallet portion now. verifyPayment sets this to the
+      // full total on capture.
+      amountPaidPaise: deferAccept ? 0 : summary.walletUsedPaise,
       paymentMethod: effectivePaymentMethod,
       paymentStatus,
       razorpayOrderId: null,
@@ -1215,6 +1344,13 @@ export const placeOrder = onCall(callableOpts, async (req) => {
       /** Set by performCancellation when it hands the redemption back, so the
        *  release can never run twice on one order. */
       couponReleasedAt: null,
+      /** When this order's wallet + coupon were actually CONSUMED. Non-deferred
+       *  orders consume at placement (stamped now); a deferred (razorpay) order
+       *  consumes at verifyPayment (null until then). performCancellation only
+       *  releases a coupon whose order consumed one — so cancelling an unpaid
+       *  order never wrongly decrements a coupon counter it never incremented.
+       *  (Legacy orders lack this field entirely → treated as consumed.) */
+      couponConsumedAt: deferAccept ? null : now,
       deliveryAddress: address,
       courier: null, trackingId: null, rider: null,
       shippedAt: null, outForDeliveryAt: null, deliveredAt: null,
@@ -1335,102 +1471,25 @@ export const placeOrder = onCall(callableOpts, async (req) => {
     // Line items are embedded on the order document above (single-document
     // model) — no per-item subcollection is written.
 
-    // Timeline.
+    // Timeline. An online order starts at 'pending_payment' (verifyPayment
+    // appends the 'accepted' entry on capture); a wallet-settled order is
+    // accepted straight away.
     const tlRef = db.collection(`orders/${orderRef.id}/timeline`).doc();
-    tx.set(tlRef, { id: tlRef.id, status: 'accepted', at: now, byUid: 'system', note: 'Order placed', createdAt: now });
+    tx.set(tlRef, {
+      id: tlRef.id,
+      status: deferAccept ? 'pending_payment' : 'accepted',
+      at: now,
+      byUid: 'system',
+      note: deferAccept ? 'Awaiting payment' : 'Order placed',
+      createdAt: now,
+    });
 
-    // Mark a personal (spin/welcome) coupon as used.
-    //
-    // `maxUsesPerCoupon` (written by executeSpin) is honoured: the status only
-    // flips to 'used' once the coupon's uses are actually spent, so a
-    // multi-use reward is not destroyed by its first redemption. The counter is
-    // written as an ABSOLUTE value derived from the snapshot read inside this
-    // transaction rather than FieldValue.increment(1) — that keeps it in step
-    // with the status flip decided from the same number, and repairs any drift
-    // rather than carrying it forward.
-    if (appliedUserCouponId && userCouponRef) {
-      const uc = (userCouponSnap?.data() as Record<string, unknown> | undefined) ?? {};
-      const maxUses = Math.max(1, Number(uc.maxUsesPerCoupon ?? 1));
-      const usesAfter = Math.max(0, Number(uc.usesCount ?? 0)) + 1;
-      tx.update(userCouponRef, {
-        status: usesAfter >= maxUses ? 'used' : 'active',
-        usedAt: now, usedOnOrderId: orderRef.id, usedOnOrderShortId: shortId,
-        usesCount: usesAfter, isNew: false, updatedAt: now,
-      });
-    }
-
-    // Wallet spend on this order — log a debit ledger row so it shows in the
-    // wallet history as "Used on order …" (−amount). Mirrors the balance debit
-    // written above; without this the spend never appears in the transaction list.
-    if (summary.walletUsedPaise > 0) {
-      const spendRef = db.collection(`customers/${uid}/walletTransactions`).doc();
-      tx.set(spendRef, {
-        id: spendRef.id, type: 'debit', source: 'order_payment', amountPaise: summary.walletUsedPaise,
-        balanceAfterPaise: Math.max(0, walletBalance - summary.walletUsedPaise),
-        title: `Used on order ${shortId}`, description: null,
-        orderId: orderRef.id, orderShortId: shortId, refType: 'order', refId: orderRef.id,
-        createdAt: now,
-      });
-    }
-
-    // Spin/wheel reward realised — log a ledger row so it shows in wallet
-    // history. It records reward *value* earned, not a balance movement, so
-    // balanceAfterPaise is the balance after this order (unchanged by the reward).
-    if (spinRewardPaise > 0) {
-      const rewardRef = db.collection(`customers/${uid}/walletTransactions`).doc();
-      tx.set(rewardRef, {
-        id: rewardRef.id, type: 'credit', source: 'spin_reward', amountPaise: spinRewardPaise,
-        balanceAfterPaise: Math.max(0, walletBalance - summary.walletUsedPaise),
-        title: `Spin reward · saved on ${shortId}`, description: couponLabel || null,
-        orderId: orderRef.id, orderShortId: shortId, refType: 'coupon', refId: appliedUserCouponId,
-        createdAt: now,
-      });
-    }
-
-    // Admin campaign-coupon cashback realised — log a ledger row so it shows in
-    // the wallet Cashback tile (which sums 'cashback' credits) and the
-    // transaction history. Records cashback *value* saved, not a balance
-    // movement, so balanceAfterPaise is unchanged by it. Mirrors the spin row.
-    if (couponCashbackPaise > 0) {
-      const cashbackRef = db.collection(`customers/${uid}/walletTransactions`).doc();
-      tx.set(cashbackRef, {
-        id: cashbackRef.id, type: 'credit', source: 'cashback', amountPaise: couponCashbackPaise,
-        balanceAfterPaise: Math.max(0, walletBalance - summary.walletUsedPaise),
-        title: `Cashback · saved on ${shortId}`, description: couponLabel || null,
-        orderId: orderRef.id, orderShortId: shortId, refType: 'coupon', refId: appliedPromoId,
-        createdAt: now,
-      });
-    }
-
-    // Promotional coupon redemption — without these counters the maxUsesTotal
-    // and maxUsesPerUser limits validated above could never actually trip.
-    //
-    // Both are written as ABSOLUTE values derived from the snapshots read inside
-    // this transaction (and floored at zero), not as blind increments: that is
-    // what stops a counter which drifted negative — see the release path in
-    // orders/cancel.ts — from silently granting redemptions beyond the limit,
-    // and it repairs the drift on the next legitimate use instead of preserving
-    // it. Correctness is unaffected by the choice: both documents are in this
-    // transaction's read set, so a concurrent checkout retries rather than
-    // interleaves.
-    if (appliedPromoId && promoRef) {
-      const c = (promoSnap?.data() as Record<string, unknown> | undefined) ?? {};
-      tx.update(promoRef, {
-        usesCount: Math.max(0, Number(c.usesCount ?? 0)) + 1,
-        updatedAt: now,
-      });
-      tx.set(
-        db.doc(`customers/${uid}/couponUsage/${appliedPromoId}`),
-        {
-          id: appliedPromoId,
-          customerId: uid,
-          count: usageCount(promoUsageSnap) + 1,
-          lastUsedAt: now,
-          lastOrderId: orderRef.id,
-        },
-        { merge: true },
-      );
-    }
+    // The wallet debit, the personal/promotional coupon redemption and their
+    // wallet ledger rows are ALL handled by applyPaidConsumption — called above
+    // for a wallet-settled order (consumes at placement) and in verifyPayment for
+    // a razorpay order (consumes on capture). Nothing is consumed here for a
+    // deferred order, so an unpaid order never shows a debited wallet or a burnt
+    // reward; a cancel-before-pay has nothing to give back.
 
     // Counter.
     tx.set(counterRef, { seq }, { merge: true });
@@ -1441,6 +1500,7 @@ export const placeOrder = onCall(callableOpts, async (req) => {
       shortId,
       affiliateUid: affiliateSnap?.id ?? null,
       commissionPaise: accruedCommissionPaise,
+      deferAccept,
     };
     return { orderId: orderRef.id, shortId, amountPaise: summary.payablePaise, paymentMethod: effectivePaymentMethod };
   });
@@ -1456,24 +1516,32 @@ export const placeOrder = onCall(callableOpts, async (req) => {
     shortId: string;
     affiliateUid: string | null;
     commissionPaise: number;
+    deferAccept: boolean;
   } | null;
   if (fresh && fresh.paymentMethod !== 'razorpay') {
     await publishInvoiceQuietly(fresh.orderId);
   }
 
   // Notifications — never on a replay, always after the commit, never fatal.
-  // 'accepted' is the one order status adminChangeOrderStatus can never emit
-  // (nothing transitions INTO it), so placement is the only place it can come
-  // from; the id is keyed by order + status, so a retry cannot repeat it.
+  // The "Order placed" (accepted) notification is sent here ONLY for an order
+  // that is accepted at placement (wallet-settled). An online order is left at
+  // 'pending_payment' and its acceptance + notification are deferred to
+  // verifyPayment on capture — so a customer who never pays is never told the
+  // order was accepted. Keyed by order + status, so a retry cannot repeat it.
   if (fresh) {
-    await notifyOrderStatus({
-      customerId: uid,
-      orderId: fresh.orderId,
-      orderShortId: fresh.shortId,
-      status: 'accepted',
-    });
-    // The referrer earns the moment the order is placed (it clears on delivery —
-    // see settleDeliveryCommissions, which announces that separately).
+    // The customer "Order placed" (accepted) notification only when the order is
+    // actually accepted at placement — i.e. NOT a deferred online order.
+    if (!fresh.deferAccept) {
+      await notifyOrderStatus({
+        customerId: uid,
+        orderId: fresh.orderId,
+        orderShortId: fresh.shortId,
+        status: 'accepted',
+      });
+    }
+    // The referrer's commission accrues at placement (it clears on delivery —
+    // see settleDeliveryCommissions, which announces that separately); its
+    // notification is independent of the customer-facing acceptance above.
     if (fresh.affiliateUid && fresh.commissionPaise > 0) {
       await notifyCommission({
         affiliateUid: fresh.affiliateUid,
@@ -1553,10 +1621,16 @@ const CancelSchema = z.object({ orderId: z.string().min(1) });
  * parcel is already with the courier must go through returns instead, so this
  * list must never simply track ORDER_STATUS_TRANSITIONS.
  *
+ * 'pending_payment' is included so the owner can cancel an unpaid online order
+ * from the "Payment pending" screen: performCancellation releases its held stock
+ * and coupon and marks it cancelled (nothing was captured, so nothing refunds).
+ * The transaction re-reads paymentStatus, so a capture landing at that instant
+ * still refunds to the wallet rather than being lost.
+ *
  * Kept in sync with CANCELLABLE_STATUSES in packages/shared/src/enums.ts, which
  * is what both storefronts hide the Cancel button on.
  */
-const CANCELLABLE = ['accepted', 'packing', 'packed'];
+const CANCELLABLE = ['pending_payment', 'accepted', 'packing', 'packed'];
 
 /**
  * Customer-initiated cancel (only while the order is still cancellable).
@@ -1710,6 +1784,9 @@ export const verifyPayment = onCall(
     // and the capture is refused (the gateway payment is then refundable by
     // hand), or the capture lands first and the cancel refunds it.
     const payRef = db.doc(`payments/${orderId}`);
+    // Set inside the transaction when a still-unpaid online order is promoted to
+    // 'accepted' by this capture — drives the "Order placed" notification below.
+    let becameAccepted = false;
     await db.runTransaction(async (tx) => {
       // ── reads ──
       const fresh = await tx.get(ref);
@@ -1725,9 +1802,37 @@ export const verifyPayment = onCall(
       // Already captured by a concurrent (or replayed) call — nothing to do.
       if (f.paymentStatus === 'captured') return;
 
+      // Promote the order the moment the payment is confirmed. An online order is
+      // created 'pending_payment'; this capture is what makes it 'accepted'. (A
+      // legacy order already 'accepted' just captures — its acceptance/timeline/
+      // notification happened at placement, so none of that repeats here.)
+      const promote = f.status === 'pending_payment';
+
+      // A deferred order consumed NOTHING at placement — its wallet debit and
+      // coupon/spin redemption happen HERE, now the money has arrived. Only on
+      // the first capture of a this-era deferred order: placeOrder stamps
+      // `couponConsumedAt: null` on exactly those, whereas a legacy pending order
+      // (placed before consumption was deferred) already consumed at placement
+      // and has no such field (undefined) — so it is skipped, never double-
+      // charged. All reads happen here, before any write.
+      const needsConsumption = promote && f.couponConsumedAt === null;
+      const custRef = needsConsumption ? db.doc(`customers/${uid}`) : null;
+      const custSnap = custRef ? await tx.get(custRef) : null;
+      const vUserCouponId = (f.userCouponId as string | null) ?? null;
+      const vPromoId = (f.couponId as string | null) ?? null;
+      const vUserCouponRef =
+        needsConsumption && vUserCouponId ? db.doc(`customers/${uid}/coupons/${vUserCouponId}`) : null;
+      const vUserCouponSnap = vUserCouponRef ? await tx.get(vUserCouponRef) : null;
+      const vPromoRef = needsConsumption && vPromoId ? db.doc(`coupons/${vPromoId}`) : null;
+      const vPromoSnap = vPromoRef ? await tx.get(vPromoRef) : null;
+      const vPromoUsageSnap =
+        needsConsumption && vPromoId
+          ? await tx.get(db.doc(`customers/${uid}/couponUsage/${vPromoId}`))
+          : null;
+
       // ── writes ──
       const now = FieldValue.serverTimestamp();
-      tx.update(ref, {
+      const orderPatch: Record<string, unknown> = {
         paymentStatus: 'captured',
         razorpayPaymentId,
         razorpaySignature,
@@ -1736,7 +1841,64 @@ export const verifyPayment = onCall(
         // the customer retried from My Orders and it went through.
         paymentFailureReason: null,
         updatedAt: now,
-      });
+      };
+      if (promote) {
+        orderPatch.status = 'accepted';
+        becameAccepted = true;
+        const tlRef = db.collection(`orders/${orderId}/timeline`).doc();
+        tx.set(tlRef, {
+          id: tlRef.id,
+          status: 'accepted',
+          at: now,
+          byUid: 'system',
+          note: 'Payment confirmed',
+          createdAt: now,
+        });
+      }
+      // Stamp the deferred consumption so it can never re-run (belt and braces —
+      // the captured-guard above already blocks a second capture).
+      if (needsConsumption) orderPatch.couponConsumedAt = now;
+      tx.update(ref, orderPatch);
+
+      // Debit the wallet + redeem the coupon/spin reward now the money is in —
+      // the SAME helper placeOrder uses for a wallet-settled order, so the two
+      // paths can never diverge. Skipped entirely for a legacy order that already
+      // consumed at placement (needsConsumption false).
+      if (needsConsumption && custRef && custSnap) {
+        const wallet = (custSnap.get('wallet') as Record<string, unknown>) ?? {};
+        const walletBalance = Number(wallet.balancePaise ?? 0);
+        const cashbackPool = Math.max(
+          0,
+          Math.min(Number(wallet.cashbackBalancePaise ?? 0), walletBalance),
+        );
+        const custUpdate: Record<string, unknown> = { updatedAt: now };
+        applyPaidConsumption(
+          tx,
+          custUpdate,
+          {
+            uid,
+            orderId,
+            shortId: (f.shortId as string) ?? '',
+            walletUsedPaise: Number(f.walletUsedPaise ?? 0),
+            walletCashbackPaise: Number(f.walletCashbackPaise ?? 0),
+            spinRewardPaise: Number(f.spinRewardPaise ?? 0),
+            couponCashbackPaise: Number(f.couponCashbackPaise ?? 0),
+            couponLabel: (f.couponCode as string) ?? '',
+            walletBalance,
+            cashbackPool,
+            appliedUserCouponId: vUserCouponId,
+            appliedPromoId: vPromoId,
+          },
+          {
+            userCouponRef: vUserCouponRef,
+            userCouponSnap: vUserCouponSnap,
+            promoRef: vPromoRef,
+            promoSnap: vPromoSnap,
+            promoUsageSnap: vPromoUsageSnap,
+          },
+        );
+        tx.update(custRef, custUpdate);
+      }
 
       // Settle the payment row (admin Payments page + GST export). Keyed by
       // order id and merge-set, so a replayed verifyPayment updates the same
@@ -1764,6 +1926,19 @@ export const verifyPayment = onCall(
     // and swallowed: a failed render must never make a captured payment look
     // unverified to the client (the money has already moved).
     await publishInvoiceQuietly(orderId);
+
+    // Now — and only now — the order is accepted, so this is where the customer
+    // learns it. Fired once (guarded by `becameAccepted`, which is false on a
+    // replay or a legacy already-accepted order) and idempotent by the
+    // `order_{id}_accepted` notification key. Never fatal to the capture result.
+    if (becameAccepted) {
+      await notifyOrderStatus({
+        customerId: uid,
+        orderId,
+        orderShortId: (o.shortId as string) ?? '',
+        status: 'accepted',
+      });
+    }
 
     return { verified: true };
   },

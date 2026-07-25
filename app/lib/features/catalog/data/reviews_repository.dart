@@ -116,7 +116,9 @@ class ReviewsRepository {
       'title': (title?.trim().isNotEmpty ?? false) ? title!.trim() : null,
       'body': body.trim(),
       'photoUrls': <String>[],
-      'status': 'pending',
+      // Verified purchasers go live instantly — no approval queue (mirrors the
+      // web writer and the rules). Moderation only takes abusive reviews down.
+      'status': 'approved',
       'moderatedBy': null,
       'moderatedAt': null,
       'helpfulCount': 0,

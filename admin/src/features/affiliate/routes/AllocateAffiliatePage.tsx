@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
-import { RiArrowDownLine } from '@remixicon/react';
 import type { Customer } from '@barkath/shared';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
@@ -11,14 +10,7 @@ import { cfError } from '@/lib/cfError';
 import { useCanView } from '@/features/auth/useCanView';
 import { noPermissionTitle, useCanDo } from '@/features/auth/useCan';
 import { useCustomersList } from '@/features/customers/api/customers';
-import {
-  allocateAffiliate,
-  formatRate,
-  rateFraction,
-  rateOptionsFor,
-  ratePercent,
-  updateAffiliateTerms,
-} from '../api/affiliate';
+import { allocateAffiliate, updateAffiliateTerms } from '../api/affiliate';
 
 /** Preview of the code the server will assign — first name + short suffix. */
 function previewCode(name: string, uid: string): string {
@@ -38,14 +30,12 @@ export function AllocateAffiliatePage() {
   const canAllocate = useCanDo('affiliateProgram', 'edit');
   const { data: customers } = useCustomersList(canViewCustomers);
   const [uid, setUid] = useState('');
-  const [rate, setRate] = useState('5');
   const [walletEnabled, setWalletEnabled] = useState(true);
   const [confirm, setConfirm] = useState(false);
 
-  // Existing affiliates used to be filtered OUT of this picker, which made the
-  // commission rate a write-once field: once allocated, no screen could ever
-  // reach it again. They stay in the list and are marked, so this screen both
-  // allocates and re-terms — which is exactly what adminAllocateAffiliate does.
+  // Existing affiliates stay in the list and are marked, so this screen both
+  // allocates and re-terms (wallet access) — which is what adminAllocateAffiliate
+  // / adminUpdateAffiliateCommission do.
   const options = useMemo(
     () =>
       customers.map((c) => ({
@@ -61,42 +51,32 @@ export function AllocateAffiliatePage() {
   );
   const existing = selected?.affiliate?.enabled ? selected.affiliate : null;
 
-  // Load the affiliate's current terms when one is picked, so saving can never
-  // silently reset a rate the admin didn't mean to touch. Keyed on uid alone —
-  // re-running on every `customers` snapshot would discard edits in progress.
+  // Load the affiliate's current wallet access when one is picked. Keyed on uid
+  // alone — re-running on every `customers` snapshot would discard edits.
   useEffect(() => {
     const aff = customers.find((c) => c.uid === uid)?.affiliate;
-    if (aff?.enabled) {
-      setRate(String(ratePercent(aff.commissionRate) ?? 5));
-      setWalletEnabled(aff.walletEnabled !== false);
-    } else {
-      setRate('5');
-      setWalletEnabled(true);
-    }
+    setWalletEnabled(aff?.enabled ? aff.walletEnabled !== false : true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uid]);
 
   // An existing affiliate keeps the code they already have — the server only
   // assigns one when there isn't one, so previewing a fresh code would lie.
   const code = existing?.referralCode ?? (selected ? previewCode(selected.name, selected.uid) : '—');
-  const rateOptions = rateOptionsFor(existing?.commissionRate);
   const actionLabel = existing ? 'Save changes' : 'Allocate';
 
   const doAllocate = async () => {
     if (!selected) return;
-    // Percent in the UI, fraction on the wire — 0.05, the shape Firestore holds.
-    const commissionRate = rateFraction(Number(rate));
     try {
       if (existing) {
-        await updateAffiliateTerms({ uid: selected.uid, commissionRate, walletEnabled });
-        toast.success(`${selected.name}’s affiliate terms updated`);
+        await updateAffiliateTerms({ uid: selected.uid, walletEnabled });
+        toast.success(`${selected.name}’s affiliate access updated`);
       } else {
-        await allocateAffiliate({ uid: selected.uid, commissionRate, walletEnabled });
+        await allocateAffiliate({ uid: selected.uid, walletEnabled });
         toast.success(`${selected.name} is now an affiliate`);
       }
       navigate('/affiliate');
     } catch (e) {
-      toast.error(cfError(e, existing ? 'update the affiliate terms' : 'allocate the affiliate'));
+      toast.error(cfError(e, existing ? 'update the affiliate' : 'allocate the affiliate'));
       setConfirm(false);
     }
   };
@@ -104,10 +84,6 @@ export function AllocateAffiliatePage() {
   const onAllocateClick = () => {
     if (!canViewCustomers) return toast.info('Allocating an affiliate needs the Customers permission.');
     if (!selected) return toast.error('Select a customer to allocate.');
-    const percent = Number(rate);
-    if (!Number.isFinite(percent) || percent <= 0 || percent > 100) {
-      return toast.error('Pick a commission rate between 0% and 100%.');
-    }
     setConfirm(true);
   };
 
@@ -146,8 +122,8 @@ export function AllocateAffiliatePage() {
                 second allocation — say which one is about to happen. */}
             {existing && (
               <p className="-mt-1 font-ui text-[11px] leading-tight text-text-tertiary">
-                Already an affiliate on {formatRate(existing.commissionRate)}. Saving updates their rate and wallet
-                access; their referral code, balances and referrals are untouched.
+                Already an affiliate. Saving updates their wallet access; their referral code, balances
+                and referrals are untouched.
               </p>
             )}
 
@@ -159,32 +135,17 @@ export function AllocateAffiliatePage() {
               </div>
             </div>
 
-            {/* Commission rate + Wallet */}
-            <div className="grid grid-cols-2 gap-3.5">
-              <Select label="Commission rate" value={rate} onChange={setRate} options={rateOptions} />
-              <div className="flex flex-col gap-1.5">
-                <span className="font-ui text-xs font-bold text-text-primary">Wallet</span>
-                <div className="flex h-[42px] items-center justify-between rounded-sm border border-border-default bg-surface-card px-3 font-ui text-[13px] font-medium text-text-primary">
-                  Affiliate wallet
-                  <RiArrowDownLine size={16} className="text-text-tertiary" />
-                </div>
-              </div>
-            </div>
-
             {/* Enable affiliate wallet access */}
             <div className="flex items-center justify-between">
               <span className="font-ui text-[13px] font-semibold text-text-secondary">Enable affiliate wallet access</span>
               <Toggle checked={walletEnabled} onChange={setWalletEnabled} />
             </div>
 
-            {/* Commission is written at the rate in force when the order was
-                placed and is never recalculated. */}
-            {existing && (
-              <p className="font-ui text-[11px] leading-tight text-text-tertiary">
-                The new rate applies to commission earned from now on. Commission already accrued, confirmed or paid is
-                not recalculated.
-              </p>
-            )}
+            {/* Commission is configured per product, not here. */}
+            <p className="font-ui text-[11px] leading-tight text-text-tertiary">
+              Commission is set on each product (a fixed amount or a percentage) — an affiliate earns it
+              whenever someone they referred buys that product. There is no per-affiliate rate.
+            </p>
           </div>
         </div>
       </div>
@@ -193,19 +154,19 @@ export function AllocateAffiliatePage() {
       <ConfirmDialog
         open={confirm}
         variant="primary"
-        title={existing ? 'Update affiliate terms?' : 'Allocate affiliate?'}
+        title={existing ? 'Update affiliate access?' : 'Allocate affiliate?'}
         body={
           selected ? (
             existing ? (
               <>
-                <strong className="text-text-primary">{selected.name}</strong> moves from{' '}
-                {formatRate(existing.commissionRate)} to {rate}% commission, with wallet access{' '}
-                {walletEnabled ? 'enabled' : 'disabled'}. Commission already accrued is not recalculated.
+                <strong className="text-text-primary">{selected.name}</strong>’s wallet access will be{' '}
+                {walletEnabled ? 'enabled' : 'disabled'}. Their referral code, balances and referrals are untouched.
               </>
             ) : (
               <>
-                <strong className="text-text-primary">{selected.name}</strong> will get affiliate access with a{' '}
-                {rate}% commission rate{walletEnabled ? ' and affiliate wallet access' : ''}. A referral code is assigned automatically.
+                <strong className="text-text-primary">{selected.name}</strong> will get affiliate access
+                {walletEnabled ? ' with affiliate wallet access' : ''}. A referral code is assigned automatically.
+                Commission is configured per product.
               </>
             )
           ) : null

@@ -22,19 +22,35 @@ import 'data/checkout_repository.dart';
 /// Screen — Payment (Figma node 46:6900). Tapping "Pay" places the order via the
 /// `placeOrder` Cloud Function (atomic stock ↓, shortId).
 ///
-///  • Wallet-covered → the server settles it outright and we route straight to
-///    confirmation.
-///  • Online → the order is placed as `pending`, `createRazorpayOrder` opens a
-///    Razorpay order, the **native Razorpay checkout** collects the payment,
-///    and `verifyPayment` validates the signature server-side before we
-///    confirm. Works in Razorpay TEST mode with a `rzp_test_…` key (the key id
-///    is returned by the Cloud Function; the secret lives only in Secret
-///    Manager). The order stays `pending` if the user cancels or a payment
-///    fails, so re-pressing Pay resumes the same order (stable [_nonce]).
+///  • Wallet-covered → the server settles it outright (status `accepted`) and we
+///    route straight to confirmation.
+///  • Online → the order is created with status `pending_payment` — NOT accepted,
+///    and no "Order placed" notification is sent yet. `createRazorpayOrder` opens
+///    a Razorpay order, the **native Razorpay checkout** collects the payment,
+///    and `verifyPayment` validates the signature server-side; only then does the
+///    server promote the order to `accepted` and notify the customer. Works in
+///    Razorpay TEST mode with a `rzp_test_…` key (the key id is returned by the
+///    Cloud Function; the secret lives only in Secret Manager). The order stays
+///    `pending_payment` if the user cancels or a payment fails, so re-pressing
+///    Pay resumes the same order (stable [_nonce]); an order never paid is
+///    cancelled by the server's abandoned-order sweep.
 class PaymentScreen extends StatefulWidget {
-  const PaymentScreen({super.key, this.payablePaise = 0});
+  const PaymentScreen({
+    super.key,
+    this.payablePaise = 0,
+    this.resumeOrderId,
+    this.resumeShortId,
+  });
 
   final int payablePaise;
+
+  /// RESUME mode: finish paying an order that already exists (placed online but
+  /// left unpaid — a dismissed/declined sheet). When set, this screen skips
+  /// `placeOrder` entirely and reopens the gateway for [resumeOrderId] via the
+  /// same handlers the first attempt used, so no second order is created and no
+  /// stock/wallet moves twice. Reached from "Pay now" on My orders.
+  final String? resumeOrderId;
+  final String? resumeShortId;
 
   @override
   State<PaymentScreen> createState() => _PaymentScreenState();
@@ -60,6 +76,9 @@ class _PaymentScreenState extends State<PaymentScreen>
   bool _reconciling = false; // one reconciliation at a time
 
   static const _razorpayBlue = Color(0xFF0B5FBF);
+
+  /// Finishing payment for an order that already exists (see PaymentScreen doc).
+  bool get _resume => widget.resumeOrderId != null;
 
   @override
   void initState() {
@@ -105,15 +124,23 @@ class _PaymentScreenState extends State<PaymentScreen>
       final placed = _pendingOrder;
       // The plugin reported in after all (or we already navigated away).
       if (!mounted || placed == null || !_processing || _verifying) return;
-      final cart = context.read<CartProvider>();
-      final draft = context.read<CheckoutDraft>();
+      // No bag/draft to clear when resuming an already-placed order.
+      final cart = _resume ? null : context.read<CartProvider>();
+      final draft = _resume ? null : context.read<CheckoutDraft>();
       final status = await _repo.fetchPaymentStatus(placed.orderId);
       if (!mounted || !_processing || _verifying) return;
       if (status == 'captured') {
         // A webhook (or an earlier verify) already settled it.
+        if (_resume) {
+          AppToast.show(context,
+              'Payment received — your order is confirmed.',
+              variant: AppToastVariant.success);
+          context.pop();
+          return;
+        }
         CheckoutAttempt.clear();
-        cart.clear();
-        draft.reset();
+        cart!.clear();
+        draft!.reset();
         if (!mounted) return;
         context.go(Routes.orderConfirmation, extra: placed);
         return;
@@ -130,8 +157,52 @@ class _PaymentScreenState extends State<PaymentScreen>
     }
   }
 
+  /// Open the gateway for an order that ALREADY exists — the "Pay now" resume
+  /// from My orders, and the on-screen retry after a failed attempt. Reuses this
+  /// order's Razorpay order server-side, so payment can never be collected twice
+  /// and no second order is placed.
+  Future<void> _resumeGateway(PlacedOrder placed) async {
+    setState(() => _processing = true);
+    try {
+      _pendingOrder = placed;
+      final rzp = await _repo.createRazorpayOrder(placed.orderId);
+      if (!mounted) return;
+      await _openCheckout(rzp, placed);
+    } on FirebaseFunctionsException catch (e) {
+      if (mounted) {
+        setState(() => _processing = false);
+        AppToast.show(context, e.message ?? 'Payment could not be started.',
+            variant: AppToastVariant.error);
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _processing = false);
+        AppToast.show(context,
+            'Payment could not be started. Please try again.',
+            variant: AppToastVariant.error);
+      }
+    }
+  }
+
   Future<void> _pay() async {
     if (_processing) return;
+
+    // RESUME (from My orders) or on-screen RETRY after a failed attempt: the
+    // order already exists — reopen the gateway for it, never place a new one.
+    if (_resume) {
+      await _resumeGateway(PlacedOrder(
+        orderId: widget.resumeOrderId!,
+        shortId: widget.resumeShortId ?? '',
+        amountPaise: widget.payablePaise,
+        paymentMethod: 'razorpay',
+      ));
+      return;
+    }
+    if (_pendingOrder != null) {
+      await _resumeGateway(_pendingOrder!);
+      return;
+    }
+
     final cart = context.read<CartProvider>();
     final draft = context.read<CheckoutDraft>();
     if (draft.addressId == null || cart.lines.isEmpty) {
@@ -171,26 +242,24 @@ class _PaymentScreenState extends State<PaymentScreen>
       );
       // Consumed server-side — Checkout must not release it when it is popped.
       CheckoutHold.clear();
+      // The order now holds these items — empty the bag so they aren't in two
+      // places. The order lives in My orders; a dismissed/declined payment is
+      // retried from there (or by re-pressing Pay, which resumes THIS order via
+      // _pendingOrder), never by re-placing an empty cart.
+      cart.clear();
+      draft.reset();
 
-      // Something left to pay → hand off to Razorpay. The order stays
-      // 'pending'; we only clear the bag after verifyPayment. The server's own
-      // verdict decides: it settles the order as 'wallet' when the balance
-      // covered everything, and there is then no gateway leg to run.
+      // Something left to pay → hand off to Razorpay for the placed order. It
+      // stays 'pending_payment' until verifyPayment; the server settles it as
+      // 'wallet' when the balance covered everything, leaving no gateway leg.
       if (placed.paymentMethod == 'razorpay' && placed.amountPaise > 0) {
-        _pendingOrder = placed;
-        final rzp = await _repo.createRazorpayOrder(placed.orderId);
-        if (!mounted) return;
-        await _openCheckout(rzp, placed);
+        await _resumeGateway(placed);
         return; // success/failure continues in the Razorpay event handlers
       }
 
       // Nothing was left to collect, so the server settled the order itself.
-      // Guard mounted FIRST: if the screen was dismissed mid-flight, still
-      // clear the bag/draft (the order IS placed) but skip navigation.
       // Nothing more can go wrong for this order, so retire the placement key.
       CheckoutAttempt.clear();
-      cart.clear();
-      draft.reset();
       if (!mounted) return;
       context.go(Routes.orderConfirmation, extra: placed);
     } on FirebaseFunctionsException catch (e) {
@@ -256,8 +325,9 @@ class _PaymentScreenState extends State<PaymentScreen>
     // stranded spinner.
     _verifying = true;
     // Capture providers before any await (context read must precede async gap).
-    final cart = context.read<CartProvider>();
-    final draft = context.read<CheckoutDraft>();
+    // In resume mode there is no bag/draft to clear — leave them untouched.
+    final cart = _resume ? null : context.read<CartProvider>();
+    final draft = _resume ? null : context.read<CheckoutDraft>();
     try {
       final ok = await _repo.verifyPayment(
         orderId: placed.orderId,
@@ -282,13 +352,24 @@ class _PaymentScreenState extends State<PaymentScreen>
         }
         return;
       }
+      // Resume mode: the order was already placed, so there is no bag/draft to
+      // clear. Just confirm and return to My orders — the live order stream
+      // flips it to "Accepted" on its own.
+      if (_resume) {
+        if (!mounted) return;
+        AppToast.show(context,
+            'Payment received — your order is confirmed.',
+            variant: AppToastVariant.success);
+        context.pop();
+        return;
+      }
       // Paid and verified — only now is the attempt over, so only now may the
       // placement key be retired. Every failure path above deliberately keeps
       // it, so pressing Pay again resumes THIS order instead of placing a new
       // one (mirrors the web, which retires `nonceRef` at the same point).
       CheckoutAttempt.clear();
-      cart.clear();
-      draft.reset();
+      cart!.clear();
+      draft!.reset();
       if (!mounted) return;
       context.go(Routes.orderConfirmation, extra: placed);
     } catch (_) {

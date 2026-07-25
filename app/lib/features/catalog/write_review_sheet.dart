@@ -100,7 +100,7 @@ class _WriteReviewSheetState extends State<_WriteReviewSheet> {
       );
       if (!mounted) return;
       Navigator.of(context).pop();
-      AppToast.show(context, 'Thanks! Your review is pending approval.',
+      AppToast.show(context, 'Thanks! Your review is now live.',
           variant: AppToastVariant.success);
     } on FirebaseException catch (e) {
       if (!mounted) return;

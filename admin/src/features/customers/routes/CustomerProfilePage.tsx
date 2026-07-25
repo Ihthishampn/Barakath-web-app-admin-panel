@@ -13,7 +13,6 @@ import {
 } from '@barkath/shared';
 import { Avatar } from '@/components/ui/Avatar';
 import { Button } from '@/components/ui/Button';
-import { Select } from '@/components/ui/Select';
 import { Badge, OrderStatusBadge } from '@/components/ui/StatusBadge';
 import { Toggle } from '@/components/ui/Toggle';
 import { Spinner } from '@/components/ui/Spinner';
@@ -24,13 +23,7 @@ import { downloadText } from '@/lib/exportCsv';
 import { cfError } from '@/lib/cfError';
 import { useCanView } from '@/features/auth/useCanView';
 import { noPermissionTitle, useCanDo } from '@/features/auth/useCan';
-import {
-  formatRate,
-  rateFraction,
-  rateOptionsFor,
-  ratePercent,
-  updateAffiliateTerms,
-} from '@/features/affiliate/api/affiliate';
+import { updateAffiliateTerms } from '@/features/affiliate/api/affiliate';
 import {
   adjustWallet,
   grantSpins,
@@ -188,13 +181,7 @@ export function CustomerProfilePage() {
                   <span className="font-ui text-xs text-text-tertiary">Referred customers</span>
                   <span className="font-ui text-[13px] font-bold text-text-primary">{customer.affiliate.referredCount ?? 0}</span>
                 </div>
-                {/* The rate the affiliate actually earns at, and whether they may
-                    withdraw. Both were set once at allocation and then invisible
-                    and unchangeable for the rest of the affiliate's life. */}
-                <div className="mt-3 flex items-center justify-between border-t border-border-subtle pt-3">
-                  <span className="font-ui text-xs text-text-tertiary">Commission rate</span>
-                  <span className="font-ui text-[13px] font-bold text-text-primary">{formatRate(customer.affiliate.commissionRate)}</span>
-                </div>
+                {/* Commission is configured per product now, not per affiliate. */}
                 <div className="mt-3 flex items-center justify-between border-t border-border-subtle pt-3">
                   <span className="font-ui text-xs text-text-tertiary">Wallet access</span>
                   {/* Only an explicit false blocks a withdrawal (requestWithdrawal
@@ -340,33 +327,19 @@ export function CustomerProfilePage() {
  */
 function AffiliateTermsModal({ customer, onClose }: { customer: Customer; onClose: () => void }) {
   const canEditTerms = useCanDo('affiliateProgram', 'edit');
-  const current = customer.affiliate?.commissionRate;
-  const [rate, setRate] = useState(String(ratePercent(current) ?? 5));
   const [walletEnabled, setWalletEnabled] = useState(customer.affiliate?.walletEnabled !== false);
   const [busy, setBusy] = useState(false);
 
-  const options = rateOptionsFor(current);
-  const dirty =
-    Number(rate) !== (ratePercent(current) ?? -1) ||
-    walletEnabled !== (customer.affiliate?.walletEnabled !== false);
+  const dirty = walletEnabled !== (customer.affiliate?.walletEnabled !== false);
 
   const submit = async () => {
-    const percent = Number(rate);
-    if (!Number.isFinite(percent) || percent <= 0 || percent > 100) {
-      return toast.error('Pick a commission rate between 0% and 100%.');
-    }
     try {
       setBusy(true);
-      // Sent as a fraction (0.05), the shape Firestore stores — see rateFraction.
-      await updateAffiliateTerms({
-        uid: customer.uid,
-        commissionRate: rateFraction(percent),
-        walletEnabled,
-      });
-      toast.success(`${customer.name}’s affiliate terms updated`);
+      await updateAffiliateTerms({ uid: customer.uid, walletEnabled });
+      toast.success(`${customer.name}’s affiliate access updated`);
       onClose();
     } catch (e) {
-      toast.error(cfError(e, 'update the affiliate terms'));
+      toast.error(cfError(e, 'update the affiliate access'));
     } finally {
       setBusy(false);
     }
@@ -379,23 +352,17 @@ function AffiliateTermsModal({ customer, onClose }: { customer: Customer; onClos
       onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}
     >
       <div className="w-full max-w-[420px] rounded-2xl border border-border-subtle bg-surface-card p-7 shadow-lg">
-        <h2 className="font-display text-lg font-extrabold text-text-primary">Edit affiliate terms</h2>
+        <h2 className="font-display text-lg font-extrabold text-text-primary">Edit affiliate access</h2>
         <p className="mt-1.5 font-ui text-[13px] text-text-secondary">
-          {customer.name} currently earns {formatRate(current)} on every eligible order from a referred customer.
+          Commission is configured per product now — an affiliate earns whatever the products their referrals
+          buy are set to pay. This controls only whether {customer.name} may withdraw their affiliate wallet.
         </p>
         <div className="mt-4 flex flex-col gap-3.5">
-          <Select label="Commission rate" value={rate} onChange={setRate} options={options} />
           <div className="flex items-center justify-between">
             <span className="font-ui text-[13px] font-semibold text-text-secondary">Enable affiliate wallet access</span>
             <Toggle checked={walletEnabled} onChange={setWalletEnabled} disabled={busy} />
           </div>
         </div>
-        {/* Commission is written at the rate in force when the order was placed
-            and is never recalculated, so say so before the admin saves. */}
-        <p className="mt-3.5 font-ui text-[11px] leading-tight text-text-tertiary">
-          The new rate applies to commission earned from now on. Commission already accrued, confirmed or paid is not
-          recalculated.
-        </p>
         <div className="mt-4 flex justify-end gap-2.5">
           <Button variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
           {/* updateAffiliateTerms → requireModule(req, 'affiliateProgram', 'edit'). */}

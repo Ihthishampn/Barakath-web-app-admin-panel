@@ -126,6 +126,35 @@ class _OrderDetailScreenState extends State<OrderDetailScreen> {
   }
 
   Widget _actions(Order order, List<OrderItem> items) {
+    // Unpaid online order — finish paying it, or cancel it. Pay now reopens the
+    // gateway for THIS order (resume mode), so no second order is placed and no
+    // stock/wallet moves again; what's due is the total less any wallet already
+    // applied (mirrors web's `duePaise`). Cancel releases the held stock + coupon
+    // and marks the order cancelled (nothing was captured, so nothing refunds).
+    if (order.status.isAwaitingPayment) {
+      final due =
+          (order.totalPaise - order.walletUsedPaise).clamp(0, order.totalPaise);
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          AppButton.reward(
+            label: 'Pay ${Money.fromPaise(due)} now',
+            onPressed: () => context.push(Routes.payment, extra: {
+              'orderId': order.id,
+              'shortId': order.shortId,
+              'payablePaise': due,
+            }),
+          ),
+          const SizedBox(height: AppSpacing.x12),
+          AppButton.destructiveOutlined(
+            label: 'Cancel order',
+            loading: _cancelling,
+            onPressed: () => _cancel(order),
+          ),
+        ],
+      );
+    }
+
     final invoice = Expanded(
       child: AppButton.outlined(
         label: 'Invoice',
@@ -252,7 +281,9 @@ class _StatusBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (bg, fg) = order.status.badgeColors;
-    final trackable = order.status.isOpen;
+    // An unpaid order has no timeline to track yet — it isn't accepted until the
+    // payment is confirmed.
+    final trackable = order.status.isOpen && !order.status.isAwaitingPayment;
     return Container(
       padding: const EdgeInsets.all(AppSpacing.x16),
       decoration: BoxDecoration(
@@ -311,6 +342,13 @@ class _StatusBanner extends StatelessWidget {
       };
 
   String _subtitle(Order o) {
+    // Unpaid online order — never an ETA (it isn't accepted yet). Point at the
+    // Pay now button below; call out an actual failure so a retry makes sense.
+    if (o.status.isAwaitingPayment) {
+      return o.paymentStatus == 'failed'
+          ? 'Payment failed — tap Pay now to confirm your order.'
+          : 'Complete payment to confirm your order.';
+    }
     // A past-due open order never shows a stale "arriving <past date>" — say
     // it's running late instead, like Amazon/Flipkart do.
     if (o.isDelayed) return 'Your order is taking longer than expected.';

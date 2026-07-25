@@ -398,7 +398,7 @@ export function discountPct(p: Product): number {
 }
 
 /** How recently a product must have gone live to count as a "new arrival". */
-export const NEW_ARRIVAL_DAYS = 3;
+export const NEW_ARRIVAL_DAYS = 8;
 
 /** Millis a product first became visible: prefer publishedAt, fall back to createdAt. */
 function liveAtMillis(p: Product): number {

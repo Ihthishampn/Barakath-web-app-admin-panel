@@ -10,8 +10,10 @@ class CatalogRepository {
       : _db = db ?? FirebaseFirestore.instance;
   final FirebaseFirestore _db;
 
-  /// New arrivals window (mirrors web/admin — automatic, date-based).
-  static const newArrivalDays = 3;
+  /// New arrivals window (mirrors web/admin — automatic, date-based). A product
+  /// stays in New arrivals for 8 days after it goes live, then ages out on its
+  /// own. Kept in sync with web's NEW_ARRIVAL_DAYS.
+  static const newArrivalDays = 8;
 
   /// Published, visible products, real-time. NOTE: unordered (an ordered query
   /// on a different field than the `status` filter would need a composite index
@@ -106,6 +108,32 @@ class CatalogRepository {
           .toList()
         ..sort((a, b) => a.order.compareTo(b.order));
       return list;
+    });
+  }
+
+  /// End time of the flash sale currently running (admin-scheduled), or null
+  /// when none is configured — the storefront then falls back to the per-product
+  /// `isFlashSale` flag and a demo countdown. Mirrors web's `useActiveFlashSale`:
+  /// filter on `status == 'active'` (single field, no composite index) and check
+  /// the time window client-side. Every device counts down to the same instant,
+  /// so all users see the same remaining time.
+  Stream<DateTime?> activeFlashSaleEndsAt() {
+    return _db
+        .collection('flashSales')
+        .where('status', isEqualTo: 'active')
+        .snapshots()
+        .map((snap) {
+      final now = DateTime.now();
+      for (final d in snap.docs) {
+        final data = d.data();
+        if (data['visibility'] == 'hidden') continue;
+        final starts = (data['startsAt'] as Timestamp?)?.toDate();
+        final ends = (data['endsAt'] as Timestamp?)?.toDate();
+        if (starts != null && now.isBefore(starts)) continue;
+        if (ends != null && now.isAfter(ends)) continue;
+        return ends;
+      }
+      return null;
     });
   }
 

@@ -222,7 +222,7 @@ class _ReviewsScreenState extends State<ReviewsScreen> {
   }
 
   Widget _summary() {
-    if (widget.ratingCount == 0) return const SizedBox.shrink();
+    // Always shown — review-derived, 1.0 ★ · 0 ratings baseline.
     return Row(
       children: [
         Text(widget.rating.toStringAsFixed(1),

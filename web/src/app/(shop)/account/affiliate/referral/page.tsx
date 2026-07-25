@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import { RiBankLine, RiFileCopyLine, RiAddLine } from '@remixicon/react';
 import { formatMoneyInt } from '@barkath/shared';
 import { useAuth } from '@/lib/auth';
-import { commissionRatePercent, referralShareLink } from '@/lib/affiliate';
+import { referralShareLink } from '@/lib/affiliate';
 import { Button } from '@/components/ui/Button';
 import { AccountShell } from '@/components/account/AccountShell';
 
@@ -84,8 +84,7 @@ function ReferralBody() {
             Share link
           </Button>
           <p className="mt-4 font-ui text-xs text-text-tertiary">
-            You earn {commissionRatePercent(affiliate.commissionRate)}% commission on every order placed with your
-            code.
+            You earn commission on every order placed with your code — each product sets what you earn.
             {affiliate.referredCount > 0 && ` ${affiliate.referredCount} people have used it so far.`}
           </p>
         </div>

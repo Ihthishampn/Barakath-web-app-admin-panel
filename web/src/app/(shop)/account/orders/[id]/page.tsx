@@ -217,7 +217,9 @@ function OrderDetail({
         Order {order.shortId}
       </h1>
 
-      <InfoBanner tone={banner.tone}>{banner.text}</InfoBanner>
+      {/* A payable order shows the dedicated "Pay now" banner below instead —
+          two payment banners would contradict each other. */}
+      {!payable && <InfoBanner tone={banner.tone}>{banner.text}</InfoBanner>}
 
       {/* Payment still owed — say what is due and why it matters. */}
       {payable && (
@@ -393,18 +395,22 @@ function OrderDetail({
             </ActionButton>
           </button>
         )}
-        {isOpen(order.status) && (
+        {/* Nothing to track and no invoice until the payment is confirmed —
+            an unpaid order shows only "Pay now" (mirrors the order card). */}
+        {isOpen(order.status) && order.status !== 'pending_payment' && (
           <Link href={`/account/orders/${order.id}/track`}>
             <ActionButton solid>
               <RiTruckLine size={17} /> Track order
             </ActionButton>
           </Link>
         )}
-        <Link href={`/account/orders/${order.id}/invoice`}>
-          <ActionButton>
-            <RiFileTextLine size={17} /> Download invoice
-          </ActionButton>
-        </Link>
+        {order.status !== 'pending_payment' && (
+          <Link href={`/account/orders/${order.id}/invoice`}>
+            <ActionButton>
+              <RiFileTextLine size={17} /> Download invoice
+            </ActionButton>
+          </Link>
+        )}
 
         {/* Return: the badge reports an existing request on ANY item, so it must
             not hide the entry point for the order's other, still-returnable

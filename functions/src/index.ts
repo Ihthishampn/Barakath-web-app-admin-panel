@@ -49,9 +49,12 @@ export { requestReturnOrReplacement } from './returns/requests.js';
 export { adminBlockUser, adminUnblockUser } from './customers/moderation.js';
 export { adminApproveOrderRequest, adminRejectOrderRequest } from './returns/decisions.js';
 
-// Review moderation (privileged: writes the product rating aggregate, which the
-// reviews module alone may not touch directly).
+// Reviews. `adminModerateReview` flips a review's status (publish / take down);
+// `onReviewWritten` is the SOLE writer of the product rating aggregate — it
+// recomputes rating/ratingCount from the approved review set on every review
+// write, so a verified purchaser's review moves the number instantly.
 export { adminModerateReview } from './reviews/moderation.js';
+export { onReviewWritten } from './reviews/aggregate.js';
 
 // Growth callables (critical: money / cross-user fan-out).
 export {

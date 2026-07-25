@@ -17,7 +17,7 @@ import {
   type WithdrawalRequest,
 } from '@barkath/shared';
 import { useAuth } from '@/lib/auth';
-import { commissionRatePercent, referralShareLinkShort } from '@/lib/affiliate';
+import { referralShareLinkShort } from '@/lib/affiliate';
 import { useCollection } from '@/lib/useCollection';
 import { db } from '@/lib/firebase';
 import { Button } from '@/components/ui/Button';
@@ -113,7 +113,7 @@ function AffiliateBody() {
         id: `c_${c.id}`,
         kind: 'commission',
         title: `${c.referredCustomerFirstName} referred · #${c.orderShortId}`,
-        subtitle: `${commissionRatePercent(c.commissionRate)}% commission · ${formatDayShort(c.accruedAt)}`,
+        subtitle: `Commission · ${formatDayShort(c.accruedAt)}`,
         amount: formatMoneySigned(c.commissionPaise, 'credit', 2),
         ts: c.accruedAt?.toMillis?.() ?? 0,
       });

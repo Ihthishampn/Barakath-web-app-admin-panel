@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { RiAddLine, RiCloseLine, RiImageLine, RiRefreshLine, RiErrorWarningLine } from '@remixicon/react';
-import { formatMoney2dp, type Product } from '@barkath/shared';
+import { formatMoney2dp, DEFAULT_PRODUCT_COMMISSION_RATE, type Product } from '@barkath/shared';
 import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
 import { Toggle } from '@/components/ui/Toggle';
@@ -24,13 +24,14 @@ import {
   uploadProductImage,
   useProductsList,
   type ProductFormValues,
-  type ProductWithRatingParts,
 } from '../api/products';
 
 type Money = number | '';
 // `attrs` carries the variant's non-colour/size attributes untouched — the
 // attributes map is open, and the form only edits two of its keys.
-interface VRow { key: string; id?: string; colorId: string; sizeId: string; price: Money; offer: Money; referral: Money; comm: Money; attrs?: Record<string, string> }
+// Affiliate commission is a single product-level setting (see the Affiliate
+// commission control), so it is NOT a per-variant column here any more.
+interface VRow { key: string; id?: string; colorId: string; sizeId: string; price: Money; offer: Money; referral: Money; attrs?: Record<string, string> }
 interface SRow { key: string; name: string; value: string }
 
 // New arrivals are automatic in the storefront (published within the last few
@@ -43,7 +44,7 @@ const isVariantRow = (r: VRow) =>
   !!r.id || !!r.colorId || !!r.sizeId || Object.keys(r.attrs ?? {}).length > 0;
 /** A row the user actually touched — anything else is an untouched scratch row. */
 const isFilled = (r: VRow) =>
-  isVariantRow(r) || r.price !== '' || r.offer !== '' || r.referral !== '' || r.comm !== '';
+  isVariantRow(r) || r.price !== '' || r.offer !== '' || r.referral !== '';
 const toPaise = (r: Money) => (r === '' ? 0 : Math.round(Number(r) * 100));
 const toRupees = (p: number | null | undefined): Money => (p == null ? '' : p / 100);
 
@@ -59,38 +60,34 @@ function productToRows(p: Product): VRow[] {
           price: toRupees(v.mrpPaise),
           offer: toRupees(v.offerPricePaise),
           referral: toRupees(v.referralPricePaise),
-          comm: toRupees(v.commissionPaise),
           attrs,
         };
       })
-    : [{ key: uid(), colorId: '', sizeId: '', price: toRupees(p.mrpPaise), offer: toRupees(p.offerPricePaise), referral: toRupees(singlePrice(p).referralPricePaise), comm: toRupees(singlePrice(p).commissionPaise) }];
+    : [{ key: uid(), colorId: '', sizeId: '', price: toRupees(p.mrpPaise), offer: toRupees(p.offerPricePaise), referral: toRupees(singlePrice(p).referralPricePaise) }];
 }
 /**
- * Referral price + commission for a product with no variants. They are stored on
- * the product doc (saveProduct) because there is no variant to hold them; the
- * shared Product type still declares them per-variant only, hence the cast.
+ * Referral price for a product with no variants. Stored on the product doc
+ * (saveProduct) because there is no variant to hold it; the shared Product type
+ * declares it per-variant only, hence the cast.
  */
 const singlePrice = (p: Product) =>
-  p as Product & { referralPricePaise?: number | null; commissionPaise?: number | null };
+  p as Product & { referralPricePaise?: number | null };
+
+/**
+ * The product's affiliate commission as the form edits it: a type
+ * (amount|percent) plus the value for the active type. Derived from whichever of
+ * `commissionPaise` / `affiliateCommissionRate` is set; a product with neither
+ * (or a brand-new one) defaults to the percentage default so the affiliate
+ * system always has a value to work from.
+ */
+function commissionOf(p: Product | null): { type: 'amount' | 'percent'; amount: Money; percent: string } {
+  const amt = p?.commissionPaise;
+  const rate = p?.affiliateCommissionRate;
+  if (rate != null) return { type: 'percent', amount: '', percent: String(Math.round(rate * 1000) / 10) };
+  if (amt != null) return { type: 'amount', amount: amt / 100, percent: '' };
+  return { type: 'percent', amount: '', percent: String(DEFAULT_PRODUCT_COMMISSION_RATE * 100) };
+}
 const productToSpecs = (p: Product): SRow[] => p.specifications.map((s) => ({ key: uid(), name: s.key, value: s.value }));
-/**
- * The Rating inputs edit the admin-entered SEED, not the number on the
- * storefront: that one is the seed combined with the approved reviews and is
- * recomputed by both writers (see ProductRatingParts in api/products). A
- * product saved before the seed fields existed has no reviews behind its
- * aggregate, so the aggregate IS its seed.
- */
-/**
- * A brand-new product opens with a starting seed of {@link DEFAULT_SEED_RATING}
- * over {@link DEFAULT_SEED_COUNT} — so it launches showing "2.0 (1)" rather than
- * a bare "no ratings", and a real approved review then blends UP from there (the
- * seed is one weak vote, so the first genuine rating moves the number). An
- * existing product keeps whatever seed it was saved with.
- */
-const DEFAULT_SEED_RATING = 2;
-const DEFAULT_SEED_COUNT = 1;
-const seedRatingOf = (p: ProductWithRatingParts | null) => p?.seedRating ?? p?.rating ?? 0;
-const seedRatingCountOf = (p: ProductWithRatingParts | null) => p?.seedRatingCount ?? p?.ratingCount ?? 0;
 
 export function ProductFormPage() {
   const { id: routeId } = useParams();
@@ -107,8 +104,8 @@ export function ProductFormPage() {
 
   // Seed instantly from the products cache so opening an edit/duplicate never
   // blanks the screen; getProduct still runs below to refresh from the server.
-  const seed = useState<ProductWithRatingParts | null>(() =>
-    isNew ? null : getCachedList<ProductWithRatingParts>(PRODUCTS_KEY).find((p) => p.id === routeId) ?? null,
+  const seed = useState<Product | null>(() =>
+    isNew ? null : getCachedList<Product>(PRODUCTS_KEY).find((p) => p.id === routeId) ?? null,
   )[0];
 
   const [id] = useState(() => (isNew ? newProductId() : routeId!));
@@ -116,7 +113,7 @@ export function ProductFormPage() {
   const [saving, setSaving] = useState(false);
   // The loaded product — used at save time to preserve fields the form doesn't
   // edit (per-variant stock/weight/visibility live in Inventory, not here).
-  const existingRef = useRef<ProductWithRatingParts | null>(seed);
+  const existingRef = useRef<Product | null>(seed);
 
   const [name, setName] = useState(seed?.name ?? '');
   const [categoryId, setCategoryId] = useState(seed?.categoryId ?? '');
@@ -126,9 +123,13 @@ export function ProductFormPage() {
   const [isBestSeller, setIsBestSeller] = useState(seed?.isBestSeller ?? false);
   const [isFeatured, setIsFeatured] = useState(seed?.isFeatured ?? false);
   const [isFlashSale, setIsFlashSale] = useState(seed?.isFlashSale ?? false);
-  const [rating, setRating] = useState(isNew ? DEFAULT_SEED_RATING : seedRatingOf(seed));
-  const [ratingCount, setRatingCount] = useState(isNew ? DEFAULT_SEED_COUNT : seedRatingCountOf(seed));
   const [rows, setRows] = useState<VRow[]>(() => (seed ? productToRows(seed) : []));
+  // Product-level affiliate commission — a fixed amount OR a percentage (the two
+  // are mutually exclusive). A new product defaults to the percentage default.
+  const c0 = commissionOf(seed);
+  const [commissionType, setCommissionType] = useState<'amount' | 'percent'>(c0.type);
+  const [commissionAmount, setCommissionAmount] = useState<Money>(c0.amount);
+  const [commissionPercent, setCommissionPercent] = useState<string>(c0.percent);
   const [specs, setSpecs] = useState<SRow[]>(() => (seed ? productToSpecs(seed) : []));
   const [fbt, setFbt] = useState<string[]>(seed?.fbt ?? []);
   const [images, setImages] = useState<Product['images']>(seed?.images ?? []);
@@ -166,13 +167,15 @@ export function ProductFormPage() {
           setIsBestSeller(p.isBestSeller ?? false);
           setIsFeatured(p.isFeatured ?? false);
           setIsFlashSale(p.isFlashSale ?? false);
-          setRating(seedRatingOf(p));
-          setRatingCount(seedRatingCountOf(p));
           setSpecs(productToSpecs(p));
           setFbt(p.fbt ?? []);
           setImages(p.images ?? []);
           setHsnCode(p.hsnCode ?? '');
           setRows(productToRows(p));
+          const c = commissionOf(p);
+          setCommissionType(c.type);
+          setCommissionAmount(c.amount);
+          setCommissionPercent(c.percent);
         }
         setLoading(false);
       })
@@ -214,7 +217,7 @@ export function ProductFormPage() {
 
   const clearPricing = () => setErrors((x) => ({ ...x, pricing: undefined }));
   const addRow = () => {
-    setRows((r) => [...r, { key: uid(), colorId: '', sizeId: '', price: '', offer: '', referral: '', comm: '' }]);
+    setRows((r) => [...r, { key: uid(), colorId: '', sizeId: '', price: '', offer: '', referral: '' }]);
     clearPricing();
   };
   const updRow = (key: string, patch: Partial<VRow>) => {
@@ -269,20 +272,20 @@ export function ProductFormPage() {
     // No discount entered → the offer (selling) price is just the price.
     const offerOf = (r: VRow): Money => (r.offer === '' ? r.price : r.offer);
 
-    // Clamp to the storefront's contract: rating 0–5 (one decimal), reviews an integer ≥ 0.
-    const clampedRating = Math.min(5, Math.max(0, Math.round(rating * 10) / 10));
-    const clampedRatingCount = Math.max(0, Math.floor(ratingCount));
-    // These carry the SEED (saveProduct folds the approved reviews back in), so
-    // compare against the stored seed — and only send them when the admin
-    // actually edited the fields, otherwise saving an unrelated change would
-    // rewrite the aggregate from stale form state.
-    const ratingPatch: Pick<ProductFormValues, 'rating' | 'ratingCount'> =
-      isNew ||
-      clampedRating !== seedRatingOf(existingRef.current) ||
-      clampedRatingCount !== seedRatingCountOf(existingRef.current)
-        ? { rating: clampedRating, ratingCount: clampedRatingCount }
-        : {};
+    // Product-level affiliate commission — write exactly one of the two fields
+    // (the other null) from the Amount|Percent toggle. Percent is stored as a
+    // fraction; blank means "no commission configured" (the backfill/default
+    // handles legacy products, but a deliberately cleared field is honoured).
+    const commissionPaise =
+      commissionType === 'amount' && commissionAmount !== '' ? toPaise(commissionAmount) : null;
+    const affiliateCommissionRate =
+      commissionType === 'percent' && commissionPercent.trim() !== ''
+        ? Math.max(0, Math.min(100, Number(commissionPercent))) / 100
+        : null;
 
+    // Rating/reviews are NOT set here — they are review-derived and owned by the
+    // onReviewWritten trigger (locked against client writes in firestore.rules).
+    // A new product starts at the 1.0 / 0 baseline inside saveProduct.
     const values: ProductFormValues = {
       id,
       name: name.trim(),
@@ -294,16 +297,17 @@ export function ProductFormPage() {
       isBestSeller,
       isFeatured,
       isFlashSale,
-      ...ratingPatch,
       images,
       specifications: specs.filter((s) => s.name.trim()).map((s) => ({ id: s.key, key: s.name.trim(), value: s.value.trim() })),
       fbt,
       mrpPaise: toPaise(baseRow.price),
       offerPricePaise: toPaise(offerOf(baseRow)),
-      // A single-price row has no variant to carry these, so they go on the
-      // product doc — typing them used to look saved and then vanish.
+      // A single-price row has no variant to carry the referral price, so it
+      // goes on the product doc.
       referralPricePaise: baseRow.referral === '' ? null : toPaise(baseRow.referral),
-      commissionPaise: baseRow.comm === '' ? null : toPaise(baseRow.comm),
+      // Product-level affiliate commission (amount XOR percent).
+      commissionPaise,
+      affiliateCommissionRate,
       hsnCode: hsnCode.trim() || null,
       variants: hasVariants
         ? variantRows.map((r, i) => {
@@ -321,7 +325,8 @@ export function ProductFormPage() {
               // would collapse every such variant onto one SKU — keep the stored one.
               sku: !r.colorId && !r.sizeId && prev?.sku ? prev.sku : sku,
               referralPricePaise: r.referral === '' ? null : toPaise(r.referral),
-              commissionPaise: r.comm === '' ? null : toPaise(r.comm),
+              // Commission is product-level now; a variant never carries its own.
+              commissionPaise: null,
               weight: prev?.weight ?? 200,
               visibility: prev?.visibility ?? ('visible' as const),
               // Other attribute keys ride along untouched (form edits colour/size only).
@@ -492,36 +497,14 @@ export function ProductFormPage() {
               </p>
             </div>
 
-            {/* Rating — the gold star shown on storefront product cards */}
+            {/* Rating is derived from real approved reviews (never entered
+                here): a new product starts at 1.0 ★ · 0 reviews and moves only
+                as verified customers review it. */}
             <div className="mt-4 border-t border-border-subtle pt-4">
-              <div className="mb-2.5 font-ui text-xs font-bold text-text-primary">Rating</div>
-              <div className="grid grid-cols-2 gap-3.5">
-                <Field label="Rating">
-                  <input
-                    type="number"
-                    min={0}
-                    max={5}
-                    step={0.1}
-                    value={rating}
-                    onChange={(e) => setRating(e.target.value === '' ? 0 : Number(e.target.value))}
-                    placeholder="0.0"
-                    className={inputCls}
-                  />
-                </Field>
-                <Field label="Reviews count">
-                  <input
-                    type="number"
-                    min={0}
-                    step={1}
-                    value={ratingCount}
-                    onChange={(e) => setRatingCount(e.target.value === '' ? 0 : Number(e.target.value))}
-                    placeholder="0"
-                    className={inputCls}
-                  />
-                </Field>
-              </div>
-              <p className="mt-2 font-ui text-[11px] text-text-tertiary">
-                Shown on product cards. Set reviews count above 0 for it to appear. Rating is 0–5 (one decimal).
+              <div className="mb-1 font-ui text-xs font-bold text-text-primary">Rating</div>
+              <p className="font-ui text-[11px] text-text-tertiary">
+                Calculated automatically from verified customer reviews. New products start at
+                1.0&nbsp;★ with 0 reviews and update as real reviews come in — it can’t be set manually.
               </p>
             </div>
           </Card>
@@ -540,13 +523,13 @@ export function ProductFormPage() {
               {sizeVar && <SoftChip>{sizeVar.name}</SoftChip>}
             </div>
             <p className="mb-2 font-ui text-[11px] leading-snug text-text-tertiary">
-              Price varies per variant — set price, offer, referral &amp; commission for each. Leave Color/Size as “—” for a
-              single-price product.
+              Price varies per variant — set price, offer &amp; referral for each. Leave Color/Size as “—” for a
+              single-price product. Affiliate commission is set once for the whole product below.
             </p>
             <table className="w-full border-collapse">
               <thead>
                 <tr>
-                  {['Color', 'Size', 'Price', 'Offer', 'Referral', 'Comm.', ''].map((h, i) => (
+                  {['Color', 'Size', 'Price', 'Offer', 'Referral', ''].map((h, i) => (
                     <th key={i} className="px-3 py-2 text-left font-ui text-[10px] font-bold uppercase tracking-[0.03em] text-text-tertiary">
                       {h}
                     </th>
@@ -568,7 +551,6 @@ export function ProductFormPage() {
                     <MoneyCell value={r.price} onChange={(v) => updRow(r.key, { price: v })} tone="text-text-primary" error={rowErrors[r.key]?.price} />
                     <MoneyCell value={r.offer} onChange={(v) => updRow(r.key, { offer: v })} tone="text-success" error={rowErrors[r.key]?.offer} />
                     <MoneyCell value={r.referral} onChange={(v) => updRow(r.key, { referral: v })} tone="text-brand-gold-strong" error={rowErrors[r.key]?.referral} />
-                    <MoneyCell value={r.comm} onChange={(v) => updRow(r.key, { comm: v })} tone="text-brand-primary" error={rowErrors[r.key]?.comm} />
                     <td className="border-b border-border-subtle px-2 py-1.5 text-right">
                       <button onClick={() => delRow(r.key)} className="text-text-tertiary hover:text-error">
                         <RiCloseLine size={15} />
@@ -577,7 +559,7 @@ export function ProductFormPage() {
                   </tr>
                 ))}
                 <tr>
-                  <td colSpan={7} className="px-2 py-2">
+                  <td colSpan={6} className="px-2 py-2">
                     <button onClick={addRow} className="inline-flex items-center gap-1.5 font-ui text-[11px] font-bold text-brand-primary">
                       <RiAddLine size={14} /> Add row
                     </button>
@@ -588,6 +570,61 @@ export function ProductFormPage() {
             {(liveLadderError ?? errors.pricing) && (
               <p className="mt-2 font-ui text-xs text-error">{liveLadderError ?? errors.pricing}</p>
             )}
+
+            {/* Affiliate commission — one product-level setting (amount OR percent). */}
+            <div className="mt-4 border-t border-border-subtle pt-4">
+              <div className="mb-1 font-ui text-xs font-bold text-text-primary">Affiliate commission</div>
+              <p className="mb-2.5 font-ui text-[11px] leading-snug text-text-tertiary">
+                What the referrer earns when a referred customer buys this product — a fixed amount
+                per unit, or a percentage of the sale. Both scale with quantity. Leave blank to pay
+                no commission on this product.
+              </p>
+              <div className="flex items-center gap-2.5">
+                <div className="inline-flex rounded-[8px] border border-border-default p-0.5">
+                  {(['amount', 'percent'] as const).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => setCommissionType(t)}
+                      className={cn(
+                        'rounded-[6px] px-3 py-1.5 font-ui text-xs font-bold transition-colors',
+                        commissionType === t ? 'bg-brand-primary text-white' : 'text-text-secondary',
+                      )}
+                    >
+                      {t === 'amount' ? 'Amount ₹' : 'Percent %'}
+                    </button>
+                  ))}
+                </div>
+                {commissionType === 'amount' ? (
+                  <div className="relative">
+                    <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 font-ui text-xs text-text-tertiary">₹</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.5}
+                      value={commissionAmount}
+                      onChange={(e) => setCommissionAmount(e.target.value === '' ? '' : Number(e.target.value))}
+                      placeholder="0.00"
+                      className={cn(inputCls, 'h-10 w-32 pl-6')}
+                    />
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={0.5}
+                      value={commissionPercent}
+                      onChange={(e) => setCommissionPercent(e.target.value)}
+                      placeholder="5"
+                      className={cn(inputCls, 'h-10 w-32 pr-6')}
+                    />
+                    <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 font-ui text-xs text-text-tertiary">%</span>
+                  </div>
+                )}
+              </div>
+            </div>
           </Card>
 
           {/* Specifications */}
