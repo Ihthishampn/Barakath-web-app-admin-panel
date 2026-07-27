@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import { collection, documentId, onSnapshot, query, where } from 'firebase/firestore';
 import { formatMoney2dp, type Product } from '@barkath/shared';
 import { orderLimitError, setQtyError, useCart, type CartLine } from '@/lib/cart';
+import { useAuth } from '@/lib/auth';
 import { db } from '@/lib/firebase';
 import { lineStock } from '@/components/catalog/stock';
 import { Button } from '@/components/ui/Button';
@@ -26,6 +27,13 @@ export default function BagPage() {
   const remove = useCart((s) => s.remove);
   const subtotalPaise = useCart((s) => s.subtotalPaise());
   const hydrate = useCart((s) => s.hydrate);
+
+  // A signed-in customer's bag arrives from their Firestore doc via the cart
+  // auth-bridge, which only fires once `customer` has loaded — so until auth is
+  // `ready` the store still holds an empty `lines` array. Deciding "empty" on
+  // that would flash "Your bag is empty" for a second before the real bag
+  // appears, so we wait for `ready` first.
+  const ready = useAuth((s) => s.ready);
 
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
@@ -53,8 +61,9 @@ export default function BagPage() {
     return available != null && available < l.qty;
   });
 
-  // Avoid hydration mismatch: cart is client-only (localStorage).
-  if (!mounted) {
+  // Avoid hydration mismatch (cart is client-only / localStorage) and don't
+  // judge the bag empty until the signed-in cart has had a chance to load.
+  if (!mounted || !ready) {
     return (
       <div className="mx-auto max-w-page px-4 py-16 sm:px-10">
         <div className="h-8 w-40 animate-pulse rounded bg-neutral-200" />
@@ -154,42 +163,53 @@ function LineItem({
 }) {
   const short = available != null && available < line.qty;
   return (
-    <div className="flex items-center gap-4 rounded-2xl border border-border-subtle bg-surface-card p-4">
-      <div
-        className="h-20 w-20 flex-none overflow-hidden rounded-xl border border-border-subtle bg-center bg-no-repeat p-1.5"
-        style={{
-          backgroundColor: line.categoryTint || '#e6cfb4',
-          backgroundImage: line.imageUrl ? `url(${line.imageUrl})` : undefined,
-          backgroundSize: 'contain',
-          backgroundRepeat: 'no-repeat',
-          backgroundPosition: 'center',
-        }}
-      />
-      <div className="min-w-0 flex-1">
-        <div className="truncate font-ui text-base font-bold text-text-primary">{line.name}</div>
-        {line.variantLabel && (
-          <div className="mt-0.5 font-ui text-[13px] font-medium text-text-tertiary">{line.variantLabel}</div>
-        )}
-        {/* Same error-subtle/error pill the storefront already uses for an
-            unavailable state — names the line that is blocking checkout. */}
-        {short && (
-          <span className="mt-1.5 inline-flex items-center rounded-pill bg-error-subtle px-2.5 py-1 font-ui text-[11px] font-bold text-error">
-            {available === 0 ? 'Out of stock' : `Only ${available} left`}
-          </span>
-        )}
+    // Mobile: two stacked rows (thumb+info, then stepper+price) so nothing
+    // gets squeezed into an overlapping single line on a narrow screen.
+    // Desktop is unchanged: `sm:contents` dissolves the two row-wrappers back
+    // into direct children of the original single flex row.
+    <div className="flex flex-col gap-3 rounded-2xl border border-border-subtle bg-surface-card p-4 sm:flex-row sm:items-center sm:gap-4">
+      <div className="flex items-start gap-4 sm:contents">
+        <div
+          className="h-20 w-20 flex-none overflow-hidden rounded-xl border border-border-subtle bg-center bg-no-repeat p-1.5"
+          style={{
+            backgroundColor: line.categoryTint || '#e6cfb4',
+            backgroundImage: line.imageUrl ? `url(${line.imageUrl})` : undefined,
+            backgroundSize: 'contain',
+            backgroundRepeat: 'no-repeat',
+            backgroundPosition: 'center',
+          }}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-ui text-base font-bold text-text-primary">{line.name}</div>
+          {line.variantLabel && (
+            <div className="mt-0.5 font-ui text-[13px] font-medium text-text-tertiary">{line.variantLabel}</div>
+          )}
+          {/* Same error-subtle/error pill the storefront already uses for an
+              unavailable state — names the line that is blocking checkout. */}
+          {short && (
+            <span className="mt-1.5 inline-flex items-center rounded-pill bg-error-subtle px-2.5 py-1 font-ui text-[11px] font-bold text-error">
+              {available === 0 ? 'Out of stock' : `Only ${available} left`}
+            </span>
+          )}
+        </div>
+        {/* Remove — top-right of the mobile card; the desktop icon below is used
+            from `sm` up instead. */}
         <button
           type="button"
           onClick={onRemove}
-          className="mt-2 inline-flex items-center gap-1 font-ui text-[13px] font-semibold text-text-tertiary transition-colors hover:text-error sm:hidden"
+          aria-label="Remove item"
+          className="-mr-1 -mt-1 flex h-9 w-9 flex-none items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-error-subtle hover:text-error sm:hidden"
         >
-          <RiDeleteBinLine size={15} /> Remove
+          <RiDeleteBinLine size={18} />
         </button>
       </div>
 
-      <QtyStepper qty={line.qty} onDec={onDec} onInc={onInc} />
+      <div className="flex items-center justify-between gap-4 sm:contents">
+        <QtyStepper qty={line.qty} onDec={onDec} onInc={onInc} />
 
-      <div className="w-24 text-right font-display text-[17px] font-extrabold text-brand-gold-strong">
-        {formatMoney2dp(line.pricePaise * line.qty)}
+        <div className="text-right font-display text-[17px] font-extrabold text-brand-gold-strong sm:w-24">
+          {formatMoney2dp(line.pricePaise * line.qty)}
+        </div>
       </div>
 
       <button

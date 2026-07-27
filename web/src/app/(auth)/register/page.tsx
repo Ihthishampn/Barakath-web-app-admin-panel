@@ -199,7 +199,7 @@ export default function RegisterPage() {
           <Image src="/images/logo.png" alt="Barakath" width={140} height={40} className="h-9 w-auto object-contain" />
         </Link>
         <div>
-          <h2 className="m-0 mb-1.5 font-display text-[26px] font-extrabold leading-[1.1] tracking-[-0.02em] text-text-primary">
+          <h2 className="m-0 mb-1.5 font-display text-[22px] font-extrabold leading-tight tracking-[-0.02em] text-text-primary sm:text-[26px]">
             Register
           </h2>
           <p className="m-0 font-ui text-sm leading-[1.5] text-text-secondary">

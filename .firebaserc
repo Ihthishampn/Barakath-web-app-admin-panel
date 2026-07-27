@@ -1,5 +1,18 @@
 {
   "projects": {
     "default": "barkath-25607"
-  }
+  },
+  "targets": {
+    "barkath-25607": {
+      "hosting": {
+        "admin": [
+          "barkath-admin"
+        ],
+        "web": [
+          "barkath-shop"
+        ]
+      }
+    }
+  },
+  "etags": {}
 }

@@ -128,7 +128,7 @@ export default function SignInPage() {
         glow="bottom-left"
       />
 
-      <div className="mx-auto flex w-full max-w-[460px] flex-col justify-center gap-10 px-6 py-12 sm:px-10">
+      <div className="mx-auto flex w-full max-w-[460px] flex-col justify-center gap-8 px-6 py-12 sm:gap-10 sm:px-10">
         {/* mobile-only logo (brand panel is desktop-only) */}
         <Link href="/" className="lg:hidden">
           <Image src="/images/logo.png" alt="Barakath" width={140} height={40} className="h-9 w-auto object-contain" />
@@ -137,7 +137,7 @@ export default function SignInPage() {
         {/* Step 1 — phone */}
         <div className="flex flex-col gap-[22px]">
           <div>
-            <h2 className="m-0 mb-1.5 font-display text-[26px] font-extrabold leading-[1.1] tracking-[-0.02em] text-text-primary">
+            <h2 className="m-0 mb-1.5 font-display text-[22px] font-extrabold leading-tight tracking-[-0.02em] text-text-primary sm:text-[26px]">
               Enter your mobile number
             </h2>
             <p className="m-0 font-ui text-sm leading-[1.5] text-text-secondary">
